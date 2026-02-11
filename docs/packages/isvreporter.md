@@ -69,6 +69,8 @@ This command:
 
 The backend supports both single testsuite and multiple testsuites formats (pytest, JUnit, etc.).
 
+**Important:** A test run stays **STARTED** in the portal until an update is sent. If the process that was supposed to call `update` never runs (e.g. job killed, timeout, or create and test run in separate jobs with no update step), the run never reaches SUCCESS or FAILED. See [Troubleshooting: Test runs stuck in STARTED](../guides/troubleshooting-started-tests.md) for causes and fixes.
+
 ## Required Environment Variables
 
 - `ISV_SERVICE_ENDPOINT`: API endpoint URL

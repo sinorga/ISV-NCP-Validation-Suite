@@ -20,6 +20,7 @@ Welcome to the documentation for NVIDIA ISV NCP Validation Suite - a collection 
 - [External Validation Guide](guides/external-validation-guide.md) - Create custom validations without modifying the repo
 - [Remote Deployment](guides/remote-deployment.md) - Deploy and run tests on remote machines
 - [Local Development](guides/local-development.md) - MicroK8s setup for local testing
+- [Troubleshooting: Test runs stuck in STARTED](guides/troubleshooting-started-tests.md) - Why runs stay STARTED in the portal and how to fix it
 
 ### Contributing
 

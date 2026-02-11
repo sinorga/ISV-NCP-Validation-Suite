@@ -76,6 +76,8 @@ isvctl test run -f configs/k8s.yaml --lab-id 35 --isv-software-version "2.1.0-rc
 isvctl test run -f configs/k8s.yaml --dry-run
 ```
 
+When you use `--lab-id`, the same process creates the test run (shown as STARTED in the portal) and, after all phases complete, updates it to SUCCESS or FAILED. **If the process is killed, times out, or hangs before that update, the run stays STARTED.** See [Troubleshooting: Test runs stuck in STARTED](guides/troubleshooting-started-tests.md) for causes and fixes.
+
 ### Remote Deployment
 
 Deploy and run tests on a remote machine:
