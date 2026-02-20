@@ -184,3 +184,32 @@ class AzureAdProvider:
         result = self.client.users.post(user)
         return CreateUserResult(success=True, user_id=result.id, ...)
 ```
+
+## Cost & Cleanup
+
+> **Note**: IAM tests create temporary IAM users and access keys which are
+> free-tier resources. The teardown phase automatically deletes them, but if
+> teardown fails, you should manually clean up to avoid orphaned credentials.
+
+```bash
+# Find orphaned test users
+aws iam list-users --query 'Users[?starts_with(UserName, `isv-test-`)].UserName' --output table
+
+# Detach managed policies
+aws iam list-attached-user-policies --user-name isv-test-user \
+  --query 'AttachedPolicies[].PolicyArn' --output text | tr '\t' '\n' | \
+  xargs -I {} aws iam detach-user-policy --user-name isv-test-user --policy-arn {}
+
+# Remove inline policies
+aws iam list-user-policies --user-name isv-test-user \
+  --query 'PolicyNames[]' --output text | tr '\t' '\n' | \
+  xargs -I {} aws iam delete-user-policy --user-name isv-test-user --policy-name {}
+
+# Delete access keys
+aws iam list-access-keys --user-name isv-test-user \
+  --query 'AccessKeyMetadata[].AccessKeyId' --output text | tr '\t' '\n' | \
+  xargs -I {} aws iam delete-access-key --user-name isv-test-user --access-key-id {}
+
+# Delete orphaned user
+aws iam delete-user --user-name isv-test-user
+```
