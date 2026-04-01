@@ -37,7 +37,7 @@ from isvtest.validations.network import (
     StablePrivateIpCheck,
     VpcPeeringCheck,
 )
-from isvtest.validations.nim import SshNimHealthCheck, SshNimInferenceCheck, SshNimModelCheck
+from isvtest.validations.nim import NimHealthCheck, NimInferenceCheck, NimModelCheck
 
 
 class ConcreteValidation(BaseValidation):
@@ -571,14 +571,14 @@ def _nim_config(extra: dict | None = None) -> dict:
     return cfg
 
 
-class TestSshNimHealthCheck:
-    """Tests for SshNimHealthCheck validation."""
+class TestNimHealthCheck:
+    """Tests for NimHealthCheck validation."""
 
     def test_skipped_when_nim_not_deployed(self) -> None:
         """Test skip when deploy_nim was skipped."""
         import pytest
 
-        v = SshNimHealthCheck(
+        v = NimHealthCheck(
             config={
                 "step_output": {
                     "skipped": True,
@@ -596,7 +596,7 @@ class TestSshNimHealthCheck:
         mock_ssh.return_value = MagicMock()
         mock_run.return_value = (0, "\n0", "")
 
-        v = SshNimHealthCheck(config=_nim_config())
+        v = NimHealthCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is True
         assert "health check passed" in result["output"]
@@ -608,14 +608,14 @@ class TestSshNimHealthCheck:
         mock_ssh.return_value = MagicMock()
         mock_run.return_value = (1, "1", "")
 
-        v = SshNimHealthCheck(config=_nim_config())
+        v = NimHealthCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "not ready" in result["error"]
 
     def test_missing_host(self) -> None:
         """Test failure when host is missing but step succeeded."""
-        v = SshNimHealthCheck(config={"step_output": {"success": True}})
+        v = NimHealthCheck(config={"step_output": {"success": True}})
         result = v.execute()
         assert result["passed"] is False
         assert "Missing host" in result["error"]
@@ -624,13 +624,13 @@ class TestSshNimHealthCheck:
         """Test skip when deploy_nim step output is empty (timed out)."""
         import pytest
 
-        v = SshNimHealthCheck(config={"step_output": {}})
+        v = NimHealthCheck(config={"step_output": {}})
         with pytest.raises(pytest.skip.Exception, match="did not succeed"):
             v.execute()
 
 
-class TestSshNimInferenceCheck:
-    """Tests for SshNimInferenceCheck validation."""
+class TestNimInferenceCheck:
+    """Tests for NimInferenceCheck validation."""
 
     @patch("isvtest.validations.nim.get_ssh_client")
     @patch("isvtest.validations.nim.run_ssh_command")
@@ -653,7 +653,7 @@ class TestSshNimInferenceCheck:
             }
         )
 
-        v = SshNimInferenceCheck(config=_nim_config())
+        v = NimInferenceCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is True
         assert "inference OK" in result["output"]
@@ -671,7 +671,7 @@ class TestSshNimInferenceCheck:
             }
         )
 
-        v = SshNimInferenceCheck(config=_nim_config())
+        v = NimInferenceCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "No choices" in result["error"]
@@ -683,7 +683,7 @@ class TestSshNimInferenceCheck:
         mock_ssh.return_value = MagicMock()
         mock_run.return_value = (1, "", "error")
 
-        v = SshNimInferenceCheck(config=_nim_config())
+        v = NimInferenceCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "Could not determine model" in result["error"]
@@ -706,7 +706,7 @@ class TestSshNimInferenceCheck:
             }
         )
 
-        v = SshNimInferenceCheck(config=_nim_config({"model": "my-model"}))
+        v = NimInferenceCheck(config=_nim_config({"model": "my-model"}))
         result = v.execute()
         assert result["passed"] is True
 
@@ -723,14 +723,14 @@ class TestSshNimInferenceCheck:
             }
         )
 
-        v = SshNimInferenceCheck(config=_nim_config())
+        v = NimInferenceCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "Invalid JSON" in result["error"]
 
 
-class TestSshNimModelCheck:
-    """Tests for SshNimModelCheck validation."""
+class TestNimModelCheck:
+    """Tests for NimModelCheck validation."""
 
     @patch("isvtest.validations.nim.get_ssh_client")
     @patch("isvtest.validations.nim.run_ssh_command")
@@ -743,7 +743,7 @@ class TestSshNimModelCheck:
             "",
         )
 
-        v = SshNimModelCheck(config=_nim_config())
+        v = NimModelCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is True
         assert "llama" in result["output"]
@@ -755,7 +755,7 @@ class TestSshNimModelCheck:
         mock_ssh.return_value = MagicMock()
         mock_run.return_value = (0, json.dumps({"data": []}), "")
 
-        v = SshNimModelCheck(config=_nim_config())
+        v = NimModelCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "No models" in result["error"]
@@ -771,7 +771,7 @@ class TestSshNimModelCheck:
             "",
         )
 
-        v = SshNimModelCheck(config=_nim_config({"expected_model": "llama"}))
+        v = NimModelCheck(config=_nim_config({"expected_model": "llama"}))
         result = v.execute()
         assert result["passed"] is True
 
@@ -786,7 +786,7 @@ class TestSshNimModelCheck:
             "",
         )
 
-        v = SshNimModelCheck(config=_nim_config({"expected_model": "mistral"}))
+        v = NimModelCheck(config=_nim_config({"expected_model": "mistral"}))
         result = v.execute()
         assert result["passed"] is False
         assert "expected_model" in result["error"]
@@ -798,7 +798,7 @@ class TestSshNimModelCheck:
         mock_ssh.return_value = MagicMock()
         mock_run.return_value = (1, "", "connection refused")
 
-        v = SshNimModelCheck(config=_nim_config())
+        v = NimModelCheck(config=_nim_config())
         result = v.execute()
         assert result["passed"] is False
         assert "failed" in result["error"]
@@ -1028,11 +1028,11 @@ class TestValidationResultCapture:
         subtests = MagicMock()
 
         with pytest.raises(pytest.skip.Exception):
-            run_validation_entry_point(SshNimHealthCheck, config, "SshNimHealthCheck", subtests)
+            run_validation_entry_point(NimHealthCheck, config, "NimHealthCheck", subtests)
 
         assert len(_validation_results) == 1
         r = _validation_results[0]
-        assert r["name"] == "SshNimHealthCheck"
+        assert r["name"] == "NimHealthCheck"
         assert r["skipped"] is True
         assert r["passed"] is True
         assert r["category"] == "nim"

@@ -55,7 +55,7 @@ def _is_nim_skipped(config: dict) -> str | None:
     return None
 
 
-class SshNimHealthCheck(BaseValidation):
+class NimHealthCheck(BaseValidation):
     """Check NIM container health endpoint via SSH.
 
     Connects via SSH and curls the NIM /v1/health/ready endpoint.
@@ -67,7 +67,7 @@ class SshNimHealthCheck(BaseValidation):
 
     description: ClassVar[str] = "Validates NIM health endpoint"
     timeout: ClassVar[int] = 120
-    markers: ClassVar[list[str]] = ["ssh", "gpu"]
+    markers: ClassVar[list[str]] = ["ssh", "gpu", "bare_metal", "vm"]
 
     def run(self) -> None:
         skip_reason = _is_nim_skipped(self.config)
@@ -111,7 +111,7 @@ class SshNimHealthCheck(BaseValidation):
             self.set_failed(f"NIM health check failed: {e}")
 
 
-class SshNimInferenceCheck(BaseValidation):
+class NimInferenceCheck(BaseValidation):
     """Run NIM inference test via SSH.
 
     Sends a chat completion request to the NIM container and validates
@@ -127,7 +127,7 @@ class SshNimInferenceCheck(BaseValidation):
 
     description: ClassVar[str] = "Validates NIM inference via chat completions"
     timeout: ClassVar[int] = 300
-    markers: ClassVar[list[str]] = ["ssh", "gpu", "workload", "slow"]
+    markers: ClassVar[list[str]] = ["ssh", "gpu", "workload", "slow", "bare_metal", "vm"]
 
     def run(self) -> None:
         skip_reason = _is_nim_skipped(self.config)
@@ -238,7 +238,7 @@ class SshNimInferenceCheck(BaseValidation):
             self.set_failed(f"NIM inference check failed: {e}")
 
 
-class SshNimModelCheck(BaseValidation):
+class NimModelCheck(BaseValidation):
     """Check NIM /v1/models endpoint via SSH.
 
     Validates the models endpoint returns at least one model and
@@ -252,7 +252,7 @@ class SshNimModelCheck(BaseValidation):
 
     description: ClassVar[str] = "Validates NIM model listing"
     timeout: ClassVar[int] = 120
-    markers: ClassVar[list[str]] = ["ssh", "gpu"]
+    markers: ClassVar[list[str]] = ["ssh", "gpu", "bare_metal", "vm"]
 
     def run(self) -> None:
         skip_reason = _is_nim_skipped(self.config)

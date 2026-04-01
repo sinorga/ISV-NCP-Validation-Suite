@@ -50,20 +50,20 @@ to prevent resource leaks. NIM steps are shared and reusable across VMaaS and BM
 | `InstanceStateCheck` | launch_instance, reboot_instance | Verify instance is running |
 | `InstanceListCheck` | list_instances | Verify instances in VPC, target found |
 | `InstanceTagCheck` | verify_tags | Verify required tags (Name, CreatedBy) |
-| `SshConnectivityCheck` | launch_instance, start_instance, reboot_instance | SSH connectivity and command execution |
-| `SshOsCheck` | launch_instance, start_instance, reboot_instance | Verify OS type |
-| `SshCloudInitCheck` | launch_instance | Cloud-init completed successfully |
-| `SshGpuCheck` | launch_instance, start_instance, reboot_instance | GPU visibility via nvidia-smi |
-| `SshVcpuPinningCheck` | launch_instance, reboot_instance | vCPU count, NUMA topology, CPU-GPU locality |
-| `SshPciBusCheck` | launch_instance, reboot_instance | PCI GPU enumeration, PCIe link, IOMMU, BAR memory |
-| `SshHostSoftwareCheck` | launch_instance, reboot_instance | Kernel, libvirt/QEMU, SBIOS, NVIDIA drivers |
+| `ConnectivityCheck` | launch_instance, start_instance, reboot_instance | SSH connectivity and command execution |
+| `OsCheck` | launch_instance, start_instance, reboot_instance | Verify OS type |
+| `CloudInitCheck` | launch_instance | Cloud-init completed successfully |
+| `GpuCheck` | launch_instance, start_instance, reboot_instance | GPU visibility via nvidia-smi |
+| `VcpuPinningCheck` | launch_instance, reboot_instance | vCPU count, NUMA topology, CPU-GPU locality |
+| `PciBusCheck` | launch_instance, reboot_instance | PCI GPU enumeration, PCIe link, IOMMU, BAR memory |
+| `HostSoftwareCheck` | launch_instance, reboot_instance | Kernel, libvirt/QEMU, SBIOS, NVIDIA drivers |
 | `InstanceStopCheck` | stop_instance | Stop API call, state transitions to stopped |
 | `InstanceStartCheck` | start_instance | Start API call, state recovery to running |
 | `SerialConsoleCheck` | serial_console | Serial console output available and accessible |
 | `InstanceRebootCheck` | reboot_instance | Reboot API call, state recovery, SSH, uptime reset |
-| `SshNimHealthCheck` | deploy_nim | NIM `/v1/health/ready` (skipped if no NGC key) |
-| `SshNimModelCheck` | deploy_nim | NIM `/v1/models` returns expected model |
-| `SshNimInferenceCheck` | deploy_nim | Chat completion request and response validation |
+| `NimHealthCheck` | deploy_nim | NIM `/v1/health/ready` (skipped if no NGC key) |
+| `NimModelCheck` | deploy_nim | NIM `/v1/models` returns expected model |
+| `NimInferenceCheck` | deploy_nim | Chat completion request and response validation |
 | `StepSuccessCheck` | teardown | Teardown completed successfully |
 
 ## Prerequisites
@@ -145,7 +145,7 @@ Full config: [`isvctl/configs/providers/aws/vm.yaml`](../../../../providers/aws/
 Each validation SSHs into the host and runs subtests. All checks report
 subtest-level results so you can pinpoint exactly what passed or failed.
 
-### SshVcpuPinningCheck
+### VcpuPinningCheck
 
 Validates vCPU provisioning, online status, and NUMA topology.
 
@@ -161,7 +161,7 @@ Validates vCPU provisioning, online status, and NUMA topology.
 |-----------|------|---------|-------------|
 | `expected_vcpus` | int | *(auto-detect)* | Fail if vCPU count doesn't match |
 
-### SshPciBusCheck
+### PciBusCheck
 
 Validates PCI bus configuration for GPU passthrough.
 
@@ -178,7 +178,7 @@ Validates PCI bus configuration for GPU passthrough.
 | `expected_gpus` | int | `1` | Expected number of GPU PCI devices |
 | `expected_link_width` | string | *(none)* | Expected PCIe link width, e.g. `"x16"` |
 
-### SshHostSoftwareCheck
+### HostSoftwareCheck
 
 Validates the full software stack: kernel, libvirt/QEMU, SBIOS, NVIDIA drivers.
 

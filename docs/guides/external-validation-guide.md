@@ -146,8 +146,8 @@ tests:
     ssh_checks:
       step: launch_instance
       checks:
-        - SshConnectivityCheck: {}
-        - SshGpuCheck:
+        - ConnectivityCheck: {}
+        - GpuCheck:
             expected_gpus: 1
 
     teardown_checks:

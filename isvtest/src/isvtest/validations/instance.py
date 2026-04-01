@@ -32,7 +32,7 @@ class InstanceStateCheck(BaseValidation):
     """
 
     description: ClassVar[str] = "Check instance is in expected state"
-    markers: ClassVar[list[str]] = ["vm"]
+    markers: ClassVar[list[str]] = ["vm", "bare_metal"]
 
     def run(self) -> None:
         step_output = self.config.get("step_output", {})
@@ -78,7 +78,7 @@ class InstanceRebootCheck(BaseValidation):
     """
 
     description: ClassVar[str] = "Check instance rebooted successfully"
-    markers: ClassVar[list[str]] = ["vm"]
+    markers: ClassVar[list[str]] = ["vm", "bare_metal"]
 
     def run(self) -> None:
         step_output = self.config.get("step_output", {})
@@ -407,7 +407,7 @@ class InstanceListCheck(BaseValidation):
     """
 
     description: ClassVar[str] = "Check instance list from VPC"
-    markers: ClassVar[list[str]] = ["vm"]
+    markers: ClassVar[list[str]] = ["vm", "bare_metal"]
 
     REQUIRED_FIELDS = ("instance_id", "state", "vpc_id")
 

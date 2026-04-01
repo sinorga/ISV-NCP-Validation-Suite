@@ -243,7 +243,7 @@ commands:
           - "--delete-key-pair"
           - "--delete-security-group"
           - "{{teardown_flag}}"
-        timeout: 1800
+        timeout: 2400
 
       # Post-teardown sanitization: verify instance terminated and resources deleted
       - name: verify_teardown
@@ -275,7 +275,7 @@ tests:
     gpu_stress:
       step: describe_instance
       checks:
-        SshGpuStressCheck:
+        GpuStressCheck:
           runtime: 30
           memory_gb: 16
           expected_gpus: 8
@@ -284,14 +284,14 @@ tests:
     nccl:
       step: describe_instance
       checks:
-        SshNcclCheck:
+        NcclCheck:
           expected_gpus: 8
 
     # Training - AWS metal has 8 GPUs
     training:
       step: describe_instance
       checks:
-        SshTrainingCheck:
+        TrainingCheck:
           steps: 50
           expected_gpus: 8
 
@@ -299,14 +299,14 @@ tests:
     start_gpu:
       step: start_instance
       checks:
-        SshGpuCheck:
+        GpuCheck:
           expected_gpus: 8
 
     # NVLink - AWS metal has 8 GPUs
     nvlink:
       step: describe_instance
       checks:
-        SshNvlinkCheck:
+        NvlinkCheck:
           expected_gpus: 8
 
     # AWS-specific: verify OS image installed on BM instance

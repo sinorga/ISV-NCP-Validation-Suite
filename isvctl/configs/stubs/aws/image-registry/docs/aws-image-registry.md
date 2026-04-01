@@ -47,8 +47,8 @@ The AWS ISO/VMDK import validation tests verify:
 ┌──────────────────────────────────────────────────────────────────────────┐
 │  Validations (Platform-Agnostic)                                         │
 │  ┌──────────────────┐ ┌──────────────────┐ ┌──────────────────────────┐  │
-│  │ StepSuccessCheck │ │ CrudOperations   │ │ SshConnectivityCheck     │  │
-│  │ FieldExistsCheck │ │     Check        │ │ SshOsCheck, SshGpuCheck  │  │
+│  │ StepSuccessCheck │ │ CrudOperations   │ │ ConnectivityCheck        │  │
+│  │ FieldExistsCheck │ │     Check        │ │ OsCheck, GpuCheck        │  │
 │  │ InstanceState    │ │                  │ │                          │  │
 │  │     Check        │ │                  │ │                          │  │
 │  └──────────────────┘ └──────────────────┘ └──────────────────────────┘  │
@@ -81,8 +81,8 @@ uv run isvctl test run -f isvctl/configs/providers/aws/image-registry.yaml
 │  3. launch_instance (TEST phase)                                   │
 │     Create Key Pair ─▶ Create SG ─▶ Launch from imported AMI       │
 │     Output: {instance_id, public_ip, key_path}                     │
-│     Validations: InstanceStateCheck, SshConnectivityCheck,         │
-│                  SshOsCheck, SshGpuCheck                           │
+│     Validations: InstanceStateCheck, ConnectivityCheck,            │
+│                  OsCheck, GpuCheck                                 │
 └────────────────────────────────────────────────────────────────────┘
                                    │
                                    ▼
@@ -351,7 +351,7 @@ uv run isvctl test run -f isvctl/configs/providers/aws/image-registry.yaml -v
 | `image_upload` | `StepSuccessCheck`, `FieldExistsCheck` (image_id, storage_bucket, disk_ids) | upload_image |
 | `image_crud` | `StepSuccessCheck`, `FieldExistsCheck`, `CrudOperationsCheck` (get, list, create, delete) | crud_image |
 | `vm_from_image` | `StepSuccessCheck`, `FieldExistsCheck`, `InstanceStateCheck` (running) | launch_instance |
-| `vm_ssh` | `SshConnectivityCheck`, `SshOsCheck` (ubuntu) | launch_instance |
+| `vm_ssh` | `ConnectivityCheck`, `OsCheck` (ubuntu) | launch_instance |
 | `install_config_crud` | `StepSuccessCheck`, `FieldExistsCheck` (config_id, config_name, operations) | crud_install_config |
 | `teardown_checks` | `StepSuccessCheck` | teardown |
 

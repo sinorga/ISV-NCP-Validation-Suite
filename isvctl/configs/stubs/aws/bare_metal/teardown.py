@@ -96,7 +96,7 @@ def main() -> int:
             waiter = ec2.get_waiter("instance_terminated")
             waiter.wait(
                 InstanceIds=[args.instance_id],
-                WaiterConfig={"Delay": 30, "MaxAttempts": 50},
+                WaiterConfig={"Delay": 30, "MaxAttempts": 60},
             )
             print("  Instance terminated", file=sys.stderr)
         except WaiterError:
@@ -118,33 +118,61 @@ def main() -> int:
         print(json.dumps(result, indent=2))
         return 1
 
-    # Always attempt SG and key pair cleanup, even if waiter timed out
+    # Always attempt SG and key pair cleanup, even if waiter timed out.
+    # Bare-metal instances can hold SG dependencies for 30-60s after
+    # reaching "terminated" state, so retry with backoff.
     if args.delete_security_group and sg_ids:
-        time.sleep(5)
         for sg_id in sg_ids:
             try:
                 sg_info = ec2.describe_security_groups(GroupIds=[sg_id])
                 if sg_info["SecurityGroups"] and sg_info["SecurityGroups"][0].get("GroupName") == "default":
                     continue
-                ec2.delete_security_group(GroupId=sg_id)
-                result["deleted"]["security_groups"].append(sg_id)
             except ClientError as e:
-                error_code = e.response["Error"]["Code"]
-                if error_code == "DependencyViolation":
-                    result.setdefault("warnings", []).append(
-                        f"SG {sg_id} still in use (instance shutting down); will be cleaned up by AWS"
-                    )
-                elif error_code not in ("InvalidGroup.NotFound", "CannotDelete"):
-                    result.setdefault("warnings", []).append(f"Could not delete SG {sg_id}: {e}")
+                if e.response["Error"]["Code"] == "InvalidGroup.NotFound":
+                    continue
+                result.setdefault("warnings", []).append(f"Could not describe SG {sg_id}: {e}")
+                continue
+
+            deleted = False
+            for attempt in range(6):
+                delay = min(5 * 2**attempt, 60)  # 5, 10, 20, 40, 60, 60s
+                print(
+                    f"  SG {sg_id}: {'retrying' if attempt > 0 else 'waiting'} {delay}s before delete (attempt {attempt + 1}/6)...",
+                    file=sys.stderr,
+                )
+                time.sleep(delay)
+                try:
+                    ec2.delete_security_group(GroupId=sg_id)
+                    result["deleted"]["security_groups"].append(sg_id)
+                    print(f"  SG {sg_id}: deleted", file=sys.stderr)
+                    deleted = True
+                    break
+                except ClientError as e:
+                    error_code = e.response["Error"]["Code"]
+                    if error_code == "InvalidGroup.NotFound":
+                        deleted = True
+                        break
+                    if error_code != "DependencyViolation":
+                        print(f"  SG {sg_id}: {error_code} - {e}", file=sys.stderr)
+                        result.setdefault("warnings", []).append(f"Could not delete SG {sg_id}: {e}")
+                        break
+                    print(f"  SG {sg_id}: DependencyViolation", file=sys.stderr)
+
+            if not deleted:
+                result.setdefault("warnings", []).append(
+                    f"SG {sg_id} still in use after retries; may need manual cleanup"
+                )
 
     if args.delete_key_pair and key_name:
         try:
             ec2.delete_key_pair(KeyName=key_name)
             result["deleted"]["key_pairs"].append(key_name)
+            print(f"  Key pair {key_name}: deleted", file=sys.stderr)
             key_file = f"/tmp/{key_name}.pem"
             if os.path.exists(key_file):
                 os.remove(key_file)
         except ClientError as e:
+            print(f"  Key pair {key_name}: {e}", file=sys.stderr)
             result.setdefault("warnings", []).append(f"Could not delete key pair: {e}")
 
     result["success"] = True

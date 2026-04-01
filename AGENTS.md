@@ -157,8 +157,8 @@ Organized by category:
 - `instance.py` - `InstanceStateCheck`, `InstanceCreatedCheck`, `InstanceRebootCheck`
 - `network.py` - `NetworkProvisionedCheck`, `VpcCrudCheck`, `SubnetConfigCheck`, `SecurityBlockingCheck`, etc.
 - `iam.py` - `AccessKeyCreatedCheck`, `TenantCreatedCheck`, etc.
-- `ssh.py` - SSH-based validations (connectivity, OS, CPU, GPU, drivers, containers)
-- `ssh_helpers.py` - SSH connection and utility helpers (used by `ssh.py`)
+- `host.py` - Host-level validations (connectivity, OS, CPU, GPU, drivers, containers)
+- `ssh_helpers.py` - SSH connection and utility helpers (used by `host.py`)
 - `k8s_*.py` - Kubernetes-specific validations (nodes, GPU operator, scheduling, MIG)
 - `slurm_*.py` - Slurm-specific validations (partitions, jobs, GPU allocation)
 - `bm_*.py` - Bare metal validations (CUDA, driver, GPU)

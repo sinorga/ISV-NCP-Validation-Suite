@@ -254,8 +254,8 @@ tests:
     vm_ssh:
       step: launch_instance
       checks:
-        SshConnectivityCheck: {}
-        SshOsCheck:
+        ConnectivityCheck: {}
+        OsCheck:
           expected_os: "ubuntu"
 
     # --- OS Install Config CRUD ---

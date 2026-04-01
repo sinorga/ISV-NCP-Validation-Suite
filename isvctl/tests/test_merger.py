@@ -324,8 +324,8 @@ class TestDictChecksDeepMerge:
                     "ssh": {
                         "step": "describe_instance",
                         "checks": {
-                            "SshConnectivityCheck": {},
-                            "SshOsCheck": {"expected_os": "ubuntu"},
+                            "ConnectivityCheck": {},
+                            "OsCheck": {"expected_os": "ubuntu"},
                         },
                     }
                 }
@@ -336,7 +336,7 @@ class TestDictChecksDeepMerge:
                 "validations": {
                     "ssh": {
                         "checks": {
-                            "SshOsCheck": {"expected_os": "rhel"},
+                            "OsCheck": {"expected_os": "rhel"},
                         }
                     }
                 }
@@ -344,22 +344,22 @@ class TestDictChecksDeepMerge:
         }
         result = deep_merge(template, provider)
         checks = result["tests"]["validations"]["ssh"]["checks"]
-        assert checks["SshConnectivityCheck"] == {}
-        assert checks["SshOsCheck"] == {"expected_os": "rhel"}
+        assert checks["ConnectivityCheck"] == {}
+        assert checks["OsCheck"] == {"expected_os": "rhel"}
         assert result["tests"]["validations"]["ssh"]["step"] == "describe_instance"
 
     def test_add_new_check(self) -> None:
         """Provider can add a new check to an existing group."""
-        template = {"tests": {"validations": {"gpu": {"checks": {"SshGpuCheck": {"expected_gpus": 8}}}}}}
-        provider = {"tests": {"validations": {"gpu": {"checks": {"SshGpuStressCheck": {"runtime": 30}}}}}}
+        template = {"tests": {"validations": {"gpu": {"checks": {"GpuCheck": {"expected_gpus": 8}}}}}}
+        provider = {"tests": {"validations": {"gpu": {"checks": {"GpuStressCheck": {"runtime": 30}}}}}}
         result = deep_merge(template, provider)
         checks = result["tests"]["validations"]["gpu"]["checks"]
-        assert "SshGpuCheck" in checks
-        assert "SshGpuStressCheck" in checks
+        assert "GpuCheck" in checks
+        assert "GpuStressCheck" in checks
 
     def test_add_new_validation_group(self) -> None:
         """Provider can add an entirely new validation group."""
-        template = {"tests": {"validations": {"ssh": {"checks": {"SshConnectivityCheck": {}}}}}}
+        template = {"tests": {"validations": {"ssh": {"checks": {"ConnectivityCheck": {}}}}}}
         provider = {
             "tests": {"validations": {"image_installed": {"step": "verify_image", "checks": {"StepSuccessCheck": {}}}}}
         }
@@ -369,11 +369,11 @@ class TestDictChecksDeepMerge:
 
     def test_template_untouched(self) -> None:
         """deep_merge must not mutate the template."""
-        template = {"tests": {"validations": {"ssh": {"checks": {"SshOsCheck": {"expected_os": "ubuntu"}}}}}}
+        template = {"tests": {"validations": {"ssh": {"checks": {"OsCheck": {"expected_os": "ubuntu"}}}}}}
         import copy
 
         original = copy.deepcopy(template)
-        provider = {"tests": {"validations": {"ssh": {"checks": {"SshOsCheck": {"expected_os": "rhel"}}}}}}
+        provider = {"tests": {"validations": {"ssh": {"checks": {"OsCheck": {"expected_os": "rhel"}}}}}}
         deep_merge(template, provider)
         assert template == original
 

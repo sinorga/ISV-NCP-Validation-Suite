@@ -357,7 +357,7 @@ tests:
     cloud_init:
       step: launch_instance
       checks:
-        SshCloudInitCheck: {}
+        CloudInitCheck: {}
 
     instance_info:
       step: describe_instance
@@ -368,26 +368,26 @@ tests:
     ssh:
       step: describe_instance
       checks:
-        SshConnectivityCheck: {}
-        SshOsCheck:
+        ConnectivityCheck: {}
+        OsCheck:
           expected_os: "ubuntu"
 
     gpu:
       step: describe_instance
       checks:
-        SshGpuCheck:
+        GpuCheck:
           expected_gpus: 8
 
     host_os:
       step: describe_instance
       checks:
-        SshHostSoftwareCheck: {}
+        HostSoftwareCheck: {}
 
     # GPU stress test - PyTorch matrix multiplications on all GPUs
     gpu_stress:
       step: describe_instance
       checks:
-        SshGpuStressCheck:
+        GpuStressCheck:
           runtime: 30
           memory_gb: 16
 
@@ -395,31 +395,46 @@ tests:
     nccl:
       step: describe_instance
       checks:
-        SshNcclCheck: {}
+        NcclCheck: {}
 
     # DDP training workload - validates full training stack
     training:
       step: describe_instance
       checks:
-        SshTrainingCheck:
+        TrainingCheck:
           steps: 50
 
     # Network / interconnect checks
     nvlink:
       step: describe_instance
       checks:
-        SshNvlinkCheck: {}
+        NvlinkCheck: {}
 
     infiniband:
       step: describe_instance
       checks:
-        SshInfiniBandCheck: {}
+        InfiniBandCheck: {}
 
     ethernet:
       step: describe_instance
       checks:
-        SshEthernetCheck:
+        EthernetCheck:
           ping_target: "8.8.8.8"
+
+    driver_info:
+      step: describe_instance
+      checks:
+        DriverCheck: {}
+
+    cpu_info:
+      step: describe_instance
+      checks:
+        CpuInfoCheck: {}
+
+    container_runtime:
+      step: describe_instance
+      checks:
+        ContainerRuntimeCheck: {}
 
     stop_checks:
       step: stop_instance
@@ -434,14 +449,14 @@ tests:
     start_ssh:
       step: start_instance
       checks:
-        SshConnectivityCheck: {}
-        SshOsCheck:
+        ConnectivityCheck: {}
+        OsCheck:
           expected_os: "ubuntu"
 
     start_gpu:
       step: start_instance
       checks:
-        SshGpuCheck: {}
+        GpuCheck: {}
 
     reboot_checks:
       step: reboot_instance
@@ -458,20 +473,20 @@ tests:
     reboot_ssh:
       step: reboot_instance
       checks:
-        SshConnectivityCheck: {}
-        SshOsCheck:
+        ConnectivityCheck: {}
+        OsCheck:
           expected_os: "ubuntu"
 
     reboot_gpu:
       step: reboot_instance
       checks:
-        SshGpuCheck:
+        GpuCheck:
           expected_gpus: 8
 
     reboot_host_os:
       step: reboot_instance
       checks:
-        SshHostSoftwareCheck: {}
+        HostSoftwareCheck: {}
 
     # Reinstall validations (skipped when reinstall_instance step is skipped)
     reinstall_state:
@@ -483,29 +498,29 @@ tests:
     reinstall_ssh:
       step: reinstall_instance
       checks:
-        SshConnectivityCheck: {}
-        SshOsCheck:
+        ConnectivityCheck: {}
+        OsCheck:
           expected_os: "ubuntu"
 
     reinstall_gpu:
       step: reinstall_instance
       checks:
-        SshGpuCheck: {}
+        GpuCheck: {}
 
     nim_health:
       step: deploy_nim
       checks:
-        SshNimHealthCheck: {}
+        NimHealthCheck: {}
 
     nim_models:
       step: deploy_nim
       checks:
-        SshNimModelCheck: {}
+        NimModelCheck: {}
 
     nim_inference:
       step: deploy_nim
       checks:
-        SshNimInferenceCheck:
+        NimInferenceCheck:
           prompt: "What is CUDA?"
           max_tokens: 50
 

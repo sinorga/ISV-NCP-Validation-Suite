@@ -88,34 +88,34 @@ root volume replacement is slow on AWS metal (~30-45 min).
 | `list_instances` | `InstanceListCheck` | list_instances | Target instance found in VPC |
 | `topology_placement` | `TopologyPlacementCheck` | topology_placement | Placement group CRUD operations |
 | `serial_console` | `SerialConsoleCheck` | serial_console | Console output available |
-| `cloud_init` | `SshCloudInitCheck` | launch_instance | Cloud-init completed |
+| `cloud_init` | `CloudInitCheck` | launch_instance | Cloud-init completed |
 | `image_installed` | `StepSuccessCheck`, `FieldExistsCheck`, `InstanceStateCheck` | verify_image | OS image verified on BM |
 | `config_installable` | `StepSuccessCheck`, `FieldExistsCheck` | verify_config | Install config dry-run passed |
 | `instance_info` | `InstanceStateCheck` | describe_instance | Post-start state is running |
-| `ssh` | `SshConnectivityCheck`, `SshOsCheck` | describe_instance | SSH works, OS is ubuntu |
-| `gpu` | `SshGpuCheck` | describe_instance | GPU visibility (8 GPUs) |
-| `host_os` | `SshHostSoftwareCheck` | describe_instance | Kernel, drivers, BIOS |
-| `gpu_stress` | `SshGpuStressCheck` | describe_instance | PyTorch matrix multiply on all 8 GPUs |
-| `nccl` | `SshNcclCheck` | describe_instance | NCCL AllReduce (NVLink/NVSwitch) |
-| `training` | `SshTrainingCheck` | describe_instance | DDP training workload (50 steps) |
-| `nvlink` | `SshNvlinkCheck` | describe_instance | NVLink topology and bandwidth |
-| `infiniband` | `SshInfiniBandCheck` | describe_instance | InfiniBand device presence |
-| `ethernet` | `SshEthernetCheck` | describe_instance | Network connectivity (ping 8.8.8.8) |
+| `ssh` | `ConnectivityCheck`, `OsCheck` | describe_instance | SSH works, OS is ubuntu |
+| `gpu` | `GpuCheck` | describe_instance | GPU visibility (8 GPUs) |
+| `host_os` | `HostSoftwareCheck` | describe_instance | Kernel, drivers, BIOS |
+| `gpu_stress` | `GpuStressCheck` | describe_instance | PyTorch matrix multiply on all 8 GPUs |
+| `nccl` | `NcclCheck` | describe_instance | NCCL AllReduce (NVLink/NVSwitch) |
+| `training` | `TrainingCheck` | describe_instance | DDP training workload (50 steps) |
+| `nvlink` | `NvlinkCheck` | describe_instance | NVLink topology and bandwidth |
+| `infiniband` | `InfiniBandCheck` | describe_instance | InfiniBand device presence |
+| `ethernet` | `EthernetCheck` | describe_instance | Network connectivity (ping 8.8.8.8) |
 | `stop_checks` | `InstanceStopCheck` | stop_instance | Power-off confirmed |
 | `start_checks` | `InstanceStartCheck` | start_instance | Power-on confirmed |
-| `start_ssh` | `SshConnectivityCheck`, `SshOsCheck` | start_instance | SSH works after start |
-| `start_gpu` | `SshGpuCheck` | start_instance | GPUs visible after start (8 GPUs) |
+| `start_ssh` | `ConnectivityCheck`, `OsCheck` | start_instance | SSH works after start |
+| `start_gpu` | `GpuCheck` | start_instance | GPUs visible after start (8 GPUs) |
 | `reboot_checks` | `InstanceRebootCheck` | reboot_instance | Reboot confirmed (uptime < 600s) |
 | `reboot_state` | `InstanceStateCheck` | reboot_instance | Instance running after reboot |
-| `reboot_ssh` | `SshConnectivityCheck`, `SshOsCheck` | reboot_instance | SSH works after reboot |
-| `reboot_gpu` | `SshGpuCheck` | reboot_instance | GPUs visible after reboot (8 GPUs) |
-| `reboot_host_os` | `SshHostSoftwareCheck` | reboot_instance | Host OS persisted after reboot |
+| `reboot_ssh` | `ConnectivityCheck`, `OsCheck` | reboot_instance | SSH works after reboot |
+| `reboot_gpu` | `GpuCheck` | reboot_instance | GPUs visible after reboot (8 GPUs) |
+| `reboot_host_os` | `HostSoftwareCheck` | reboot_instance | Host OS persisted after reboot |
 | `reinstall_state` | `InstanceStateCheck` | reinstall_instance | Running after reinstall (if enabled) |
-| `reinstall_ssh` | `SshConnectivityCheck`, `SshOsCheck` | reinstall_instance | SSH works after reinstall |
-| `reinstall_gpu` | `SshGpuCheck` | reinstall_instance | GPUs visible after reinstall |
-| `nim_health` | `SshNimHealthCheck` | deploy_nim | NIM `/v1/health/ready` |
-| `nim_models` | `SshNimModelCheck` | deploy_nim | NIM `/v1/models` returns model |
-| `nim_inference` | `SshNimInferenceCheck` | deploy_nim | Chat completion works |
+| `reinstall_ssh` | `ConnectivityCheck`, `OsCheck` | reinstall_instance | SSH works after reinstall |
+| `reinstall_gpu` | `GpuCheck` | reinstall_instance | GPUs visible after reinstall |
+| `nim_health` | `NimHealthCheck` | deploy_nim | NIM `/v1/health/ready` |
+| `nim_models` | `NimModelCheck` | deploy_nim | NIM `/v1/models` returns model |
+| `nim_inference` | `NimInferenceCheck` | deploy_nim | Chat completion works |
 | `nim_teardown` | `StepSuccessCheck` | teardown_nim | NIM container removed |
 | `teardown_checks` | `StepSuccessCheck` | teardown | Instance terminated |
 | `sanitization` | `StepSuccessCheck` | verify_teardown | SG, key pair confirmed deleted |

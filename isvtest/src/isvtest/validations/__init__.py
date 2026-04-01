@@ -32,6 +32,12 @@ from isvtest.validations.generic import (
     SchemaValidation,
     StepSuccessCheck,
 )
+from isvtest.validations.host import (
+    CloudInitCheck,
+    ContainerRuntimeCheck,
+    CpuInfoCheck,
+    DriverCheck,
+)
 from isvtest.validations.iam import (
     AccessKeyAuthenticatedCheck,
     AccessKeyCreatedCheck,
@@ -67,11 +73,10 @@ from isvtest.validations.network import (
     VpcPeeringCheck,
 )
 from isvtest.validations.nim import (
-    SshNimHealthCheck,
-    SshNimInferenceCheck,
-    SshNimModelCheck,
+    NimHealthCheck,
+    NimInferenceCheck,
+    NimModelCheck,
 )
-from isvtest.validations.ssh import SshCloudInitCheck
 
 __all__ = [
     "AccessKeyAuthenticatedCheck",
@@ -79,8 +84,12 @@ __all__ = [
     "AccessKeyDisabledCheck",
     "AccessKeyRejectedCheck",
     "ByoipCheck",
+    "CloudInitCheck",
     "ClusterHealthCheck",
+    "ContainerRuntimeCheck",
+    "CpuInfoCheck",
     "DhcpIpManagementCheck",
+    "DriverCheck",
     "FieldExistsCheck",
     "FieldValueCheck",
     "FloatingIpCheck",
@@ -95,14 +104,13 @@ __all__ = [
     "LocalizedDnsCheck",
     "NetworkConnectivityCheck",
     "NetworkProvisionedCheck",
+    "NimHealthCheck",
+    "NimInferenceCheck",
+    "NimModelCheck",
     "NodeCountCheck",
     "PerformanceCheck",
     "SchemaValidation",
     "SecurityBlockingCheck",
-    "SshCloudInitCheck",
-    "SshNimHealthCheck",
-    "SshNimInferenceCheck",
-    "SshNimModelCheck",
     "StablePrivateIpCheck",
     "StepSuccessCheck",
     "SubnetConfigCheck",
