@@ -155,6 +155,7 @@ class SchemaValidation(BaseValidation):
 
     description: ClassVar[str] = "Validate output matches JSON schema"
     markers: ClassVar[list[str]] = []
+    catalog_exclude: ClassVar[bool] = True
 
     def run(self) -> None:
         step_output = self.config.get("step_output", {})

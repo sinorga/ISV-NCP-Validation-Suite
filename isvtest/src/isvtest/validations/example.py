@@ -18,6 +18,7 @@ class ExampleCheck(BaseValidation):
 
     description = "An example check that verifies echo works."
     markers: ClassVar[list[str]] = []
+    catalog_exclude: ClassVar[bool] = True
 
     def run(self) -> None:
         result = self.run_command("echo 'hello world'")
@@ -38,6 +39,7 @@ class SecondExampleCheck(BaseValidation):
 
     description = "An example check that verifies echo works."
     markers: ClassVar[list[str]] = []
+    catalog_exclude: ClassVar[bool] = True
 
     def run(self) -> None:
         result = self.run_command("echo 'another example'")

@@ -129,6 +129,7 @@ class PerformanceCheck(BaseValidation):
 
     description: ClassVar[str] = "Check workload performance meets requirements"
     markers: ClassVar[list[str]] = ["workload"]
+    catalog_exclude: ClassVar[bool] = True
 
     def run(self) -> None:
         step_output = self.config.get("step_output", {})

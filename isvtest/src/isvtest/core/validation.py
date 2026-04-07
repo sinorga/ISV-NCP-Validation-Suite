@@ -34,6 +34,7 @@ class BaseValidation(ABC):
     description: ClassVar[str] = ""
     timeout: ClassVar[int] = 60
     markers: ClassVar[list[str]] = []
+    catalog_exclude: ClassVar[bool] = False
 
     def __init__(self, runner: Runner | None = None, config: dict[str, Any] | None = None):
         self.config = config or {}
