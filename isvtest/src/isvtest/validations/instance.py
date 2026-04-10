@@ -326,7 +326,7 @@ class InstanceTagCheck(BaseValidation):
     """
 
     description: ClassVar[str] = "Check instance tags are present"
-    markers: ClassVar[list[str]] = ["vm"]
+    markers: ClassVar[list[str]] = ["vm", "bare_metal"]
 
     def run(self) -> None:
         step_output = self.config.get("step_output", {})

@@ -85,6 +85,18 @@ commands:
           - "{{region}}"
         timeout: 120
 
+      # Verify user-defined tags on BM instance (boto3)
+      # Reuses the VM describe_tags pattern (generic EC2 API)
+      - name: verify_tags
+        phase: test
+        command: "python3 ../../stubs/aws/bare_metal/describe_tags.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 60
+
       # Topology-based placement validation (boto3)
       - name: topology_placement
         phase: test

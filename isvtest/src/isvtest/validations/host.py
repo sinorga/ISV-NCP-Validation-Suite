@@ -1120,7 +1120,7 @@ class GpuStressCheck(BaseValidation):
                 f"Running GPU stress on {host}: runtime={runtime}s, memory={memory_gb}GB, mode={container_runtime}"
             )
 
-            _, stdout, stderr = run_ssh_command(ssh, cmd)
+            _, stdout, stderr = run_ssh_command(ssh, cmd, timeout=self.timeout)
             ssh.close()
 
             output = f"{stdout}\n{stderr}".strip()
@@ -1250,7 +1250,7 @@ class NcclCheck(BaseValidation):
             )
 
             self.log.info(f"Running NCCL AllReduce on {host} with {gpu_count} GPUs")
-            exit_code, stdout, stderr = run_ssh_command(ssh, nccl_cmd)
+            exit_code, stdout, stderr = run_ssh_command(ssh, nccl_cmd, timeout=self.timeout)
             ssh.close()
 
             output = f"{stdout}\n{stderr}".strip()
@@ -1398,7 +1398,7 @@ class TrainingCheck(BaseValidation):
                 f"batch={batch_size}, hidden={hidden_size}, mode={container_runtime}"
             )
 
-            _, stdout, stderr = run_ssh_command(ssh, cmd)
+            _, stdout, stderr = run_ssh_command(ssh, cmd, timeout=self.timeout)
             ssh.close()
 
             output = f"{stdout}\n{stderr}".strip()
