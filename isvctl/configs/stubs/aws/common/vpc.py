@@ -44,6 +44,7 @@ def create_test_vpc(
     try:
         vpc = ec2.create_vpc(CidrBlock=cidr)
         vpc_id = vpc["Vpc"]["VpcId"]
+        result["vpc_id"] = vpc_id  # Set early so finally-block cleanup can find it on partial failure
 
         ec2.create_tags(
             Resources=[vpc_id],
@@ -61,7 +62,6 @@ def create_test_vpc(
             ec2.modify_vpc_attribute(VpcId=vpc_id, EnableDnsHostnames={"Value": True})
 
         result["passed"] = True
-        result["vpc_id"] = vpc_id
         result["cidr"] = cidr
         result["message"] = f"Created VPC {vpc_id}"
     except ClientError as e:
