@@ -6,7 +6,7 @@ Preserves shebangs and skips files that already have SPDX headers.
 """
 
 import argparse
-import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -26,60 +26,55 @@ HEADER_LINES = [
 
 HEADER_TEXT = "\n".join(HEADER_LINES) + "\n"
 
-SKIP_DIRS = {
-    ".git",
-    ".venv",
-    "__pycache__",
-    "node_modules",
-    ".mypy_cache",
-    ".pytest_cache",
-    ".ruff_cache",
-    "dist",
-    ".eggs",
-    "*.egg-info",
-}
-
 SKIP_PATHS = {
     ".pre-commit-config.yaml",
     ".coderabbit.yaml",
 }
 
 
-def should_skip_dir(dirname: str) -> bool:
-    """Check if directory should be skipped."""
-    return dirname in SKIP_DIRS or dirname.endswith(".egg-info")
+def _git_ls_files() -> list[str]:
+    """List all tracked + untracked-but-not-ignored files via git."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-files", "--cached", "--others", "--exclude-standard"],
+            cwd=REPO_ROOT,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+    except FileNotFoundError as exc:
+        raise SystemExit("git is required to enumerate repository files") from exc
+    except subprocess.CalledProcessError as exc:
+        raise SystemExit(f"git ls-files failed: {exc.stderr.strip() or exc}") from exc
+
+    return [line for line in result.stdout.splitlines() if line]
 
 
 def find_files() -> list[Path]:
-    """Find all NVIDIA-authored source files that need SPDX headers."""
+    """Find all NVIDIA-authored source files that need SPDX headers.
+
+    Uses ``git ls-files`` so that .gitignore patterns (e.g. .terraform/)
+    are automatically respected.
+    """
     files: list[Path] = []
 
-    for root, dirs, filenames in os.walk(REPO_ROOT):
-        dirs[:] = [d for d in dirs if not should_skip_dir(d)]
+    for rel_str in _git_ls_files():
+        rel = Path(rel_str)
 
-        rel_root = Path(root).relative_to(REPO_ROOT)
-
-        if str(rel_root).startswith(".github"):
+        if rel.as_posix() in SKIP_PATHS:
             continue
 
-        for fname in filenames:
-            if fname in SKIP_PATHS:
-                continue
+        if rel.parts and rel.parts[0] == ".github":
+            continue
 
-            fpath = Path(root) / fname
-            ext = fpath.suffix
+        ext = rel.suffix
 
-            if ext in (".py", ".sh", ".tf"):
-                files.append(fpath)
-            elif ext in (".yaml", ".yml"):
-                rel = fpath.relative_to(REPO_ROOT)
-                parts = rel.parts
-                if (
-                    (len(parts) >= 2 and parts[0] == "isvctl")
-                    or (len(parts) >= 2 and parts[0] == "isvtest")
-                    or (len(parts) >= 2 and parts[0] == "isvreporter")
-                ):
-                    files.append(fpath)
+        if ext in (".py", ".sh", ".tf"):
+            files.append(REPO_ROOT / rel)
+        elif ext in (".yaml", ".yml"):
+            parts = rel.parts
+            if len(parts) >= 2 and parts[0] in ("isvctl", "isvtest", "isvreporter"):
+                files.append(REPO_ROOT / rel)
 
     return sorted(files)
 
