@@ -574,6 +574,71 @@ Below is a summary by category.
 | `TenantListedCheck` | Check tenant appears in list |
 | `TenantInfoCheck` | Check tenant info retrieved |
 
+## Excluding Tests
+
+Use the `tests.exclude` section to deselect tests before they run. Excluded tests are removed from collection entirely (they do not appear as skipped or failed).
+
+```yaml
+tests:
+  exclude:
+    platforms: []   # Deselect all tests with these platform markers
+    markers: []     # Deselect all tests with these markers
+    tests: []       # Deselect specific tests by name
+    files: []       # Deselect all tests in these files
+```
+
+### Exclusion Types
+
+| Key | Behavior | Bypassed by `-k` / `-m`? |
+| --- | -------- | ------------------------ |
+| `platforms` | Removes tests whose markers include the listed platform (e.g., `bare_metal`, `kubernetes`) | No -- always applied |
+| `markers` | Removes tests whose markers include any of the listed values (e.g., `workload`, `slow`) | Yes -- explicit `-k` or `-m` overrides |
+| `tests` | Removes tests matching by exact name, prefix, or parametrized ID (e.g., `K8sNcclWorkload`, `K8sNimHelmWorkload-3b`) | No -- always applied |
+| `files` | Removes tests whose source file matches (e.g., `test_host.py`) | No -- always applied |
+
+### Examples
+
+Skip all workload and slow tests (the most common use case):
+
+```yaml
+tests:
+  exclude:
+    markers:
+      - workload
+      - slow
+```
+
+Skip specific tests by name:
+
+```yaml
+tests:
+  exclude:
+    tests:
+      - K8sNcclWorkload
+      - K8sNimHelmWorkload-3b
+```
+
+### Override File
+
+You can keep exclusions in a separate file and merge it on top of any config:
+
+```bash
+isvctl test run -f isvctl/configs/tests/k8s.yaml -f my-overrides.yaml
+```
+
+A template is provided in `isvctl/configs/overrides.yaml`. Note that `exclude` lists from later `-f` files **replace** earlier lists (they are not appended).
+
+### Interaction with `-k` and `-m`
+
+When you pass explicit pytest selectors via `--`:
+
+```bash
+isvctl test run -f config.yaml -- -k "K8sNcclWorkload"
+isvctl test run -f config.yaml -- -m "workload"
+```
+
+**Marker exclusions are bypassed**, allowing you to explicitly run tests that would normally be excluded. Platform, test name, and file exclusions still apply.
+
 ## Test Markers
 
 Filter tests using pytest markers:
