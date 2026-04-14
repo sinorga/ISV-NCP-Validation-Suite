@@ -274,7 +274,7 @@ class Orchestrator:
 
         phase_results: list[PhaseResult] = []
         overall_success = True
-        setup_succeeded = False  # Track setup phase specifically
+        setup_steps_ran = False  # Track whether setup steps executed (for teardown gating)
 
         # Build set of requested phase names for filtering
         requested_phase_names = {p.value for p in requested_phases}
@@ -311,11 +311,16 @@ class Orchestrator:
                 if not overall_success and not is_teardown:
                     skip_reason = "previous phase failed"
 
-                # Skip teardown if setup failed (teardown depends on setup outputs)
-                # or if teardown_on_failure is False
+                # Teardown gating depends on whether setup was part of this run:
+                # - If setup was requested alongside teardown (full lifecycle), skip
+                #   teardown only when setup steps never actually executed.
+                # - If teardown was requested alone (e.g., `--phase teardown`), run
+                #   it unconditionally — the user is explicitly cleaning up resources
+                #   from a previous run.
                 if is_teardown:
-                    if not setup_succeeded:
-                        skip_reason = "setup phase did not succeed"
+                    setup_was_requested = "setup" in requested_phase_names or Phase.ALL in requested_phases
+                    if setup_was_requested and not setup_steps_ran:
+                        skip_reason = "setup steps did not run"
                     elif not overall_success and not teardown_on_failure:
                         skip_reason = "teardown_on_failure is disabled"
 
@@ -333,9 +338,12 @@ class Orchestrator:
 
                 # Execute steps for this phase
                 if phase_steps:
-                    step_results = self.step_executor.execute_steps(phase_steps, self.context)
+                    step_results = self.step_executor.execute_steps(phase_steps, self.context, best_effort=is_teardown)
                 else:
                     step_results = StepResults()
+
+                if phase_name == "setup" and step_results.steps:
+                    setup_steps_ran = True
 
                 # Use a per-phase temp file for JUnit XML to avoid overwriting
                 phase_junitxml: str | None = None
@@ -371,10 +379,6 @@ class Orchestrator:
                 phase_success = step_results.success and all(v.get("passed", False) for v in phase_validations)
                 if not phase_success:
                     overall_success = False
-
-                # Track setup success for teardown decision
-                if phase_name == "setup" and phase_success:
-                    setup_succeeded = True
 
             # Merge per-phase JUnit XMLs into the final output file
             if self._junitxml and phase_junit_files:
