@@ -28,6 +28,8 @@ import uuid
 from pathlib import Path
 from typing import ClassVar
 
+import pytest
+
 from isvtest.config.settings import (
     get_k8s_namespace,
     get_nccl_hpc_image,
@@ -111,11 +113,10 @@ class K8sNcclMultiNodeWorkload(BaseWorkloadCheck):
         quick_mode = self.config.get("quick_mode", False)
 
         if not self._check_mpi_operator():
-            self.set_failed(
+            pytest.skip(
                 "MPI Operator not found. Install the Kubeflow MPI Operator "
-                "(https://github.com/kubeflow/mpi-operator) to run multi-node NCCL tests on K8s."
+                "(https://github.com/kubeflow/mpi-operator) to run multi-node NCCL tests."
             )
-            return
 
         gpu_nodes = get_gpu_nodes()
         if not gpu_nodes:

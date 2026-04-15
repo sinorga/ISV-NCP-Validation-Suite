@@ -17,7 +17,9 @@ enriched with inventory data from command outputs.
 
 import copy
 import json
+import logging
 import os
+import re
 from datetime import UTC, datetime
 from typing import Any
 
@@ -26,6 +28,8 @@ from jinja2 import ChainableUndefined, Environment
 
 from isvctl.config.schema import CommandOutput, RunConfig
 from isvctl.redaction import filter_env
+
+logger = logging.getLogger(__name__)
 
 
 def _create_jinja_env() -> Environment:
@@ -95,6 +99,13 @@ class Context:
         # Step phases (for inferring validation phase from step)
         self._step_phases: dict[str, str] = {}
 
+        # Track which missing steps have already been warned about
+        self._warned_missing_steps: set[str] = set()
+        self._context_warnings: list[str] = []
+
+        # Phases that were actually requested (set by orchestrator)
+        self._requested_phases: set[str] | None = None
+
         # Layer 6: Environment variables (for {{env.VAR}} access)
         # Must be loaded before settings so settings can reference env vars.
         # Sensitive variables (API keys, secrets) are excluded to prevent
@@ -139,13 +150,24 @@ class Context:
             output: JSON output from the step command
 
         Example:
-            After provision_cluster step:
-            >>> context.set_step_output("provision_cluster", {"cluster_name": "my-cluster"})
+            After setup step:
+            >>> context.set_step_output("setup", {"cluster_name": "my-cluster"})
 
             Subsequent step can reference:
-            >>> args: ["--cluster", "{{ steps.provision_cluster.cluster_name }}"]
+            >>> args: ["--cluster", "{{ steps.setup.cluster_name }}"]
         """
         self.data.setdefault("steps", {})[step_name] = output
+
+    def set_requested_phases(self, phases: set[str]) -> None:
+        """Record which phases were requested for this run.
+
+        Used to suppress warnings for steps in phases that were
+        intentionally skipped (e.g., ``--phase teardown``).
+
+        Args:
+            phases: Set of phase names that were requested
+        """
+        self._requested_phases = phases
 
     def set_step_phase(self, step_name: str, phase: str) -> None:
         """Record the phase a step belongs to.
@@ -222,6 +244,10 @@ class Context:
         """
         return self.data
 
+    def get_warnings(self) -> list[str]:
+        """Return any warnings about missing step data or fields."""
+        return list(self._context_warnings)
+
     def render_string(self, template_str: str) -> str:
         """Render a Jinja2 template string with context.
 
@@ -234,9 +260,73 @@ class Context:
         if "{{" not in template_str or "}}" not in template_str:
             return template_str
 
+        self._warn_missing_step_defaults(template_str)
+
         env = _create_jinja_env()
         template = env.from_string(template_str)
         return template.render(**self.data)
+
+    _STEP_PATH_RE = re.compile(r"steps\.([\w.]+)")
+
+    def _warn_missing_step_defaults(self, template_str: str) -> None:
+        """Warn when a template references missing step data.
+
+        Detects two cases that ``ChainableUndefined`` would silently absorb:
+
+        1. **Step not run** — ``steps.setup`` is empty because ``--phase test``
+           skipped setup.
+        2. **Field not found** — ``steps.setup`` has output but the referenced
+           field doesn't exist (typo, rename, wrong variable).
+
+        Emits a one-time warning per unique path so operators know defaults
+        are in effect and can verify they're correct.
+
+        Args:
+            template_str: Jinja2 template string to scan for step references
+        """
+        steps_data = self.data.get("steps", {})
+        for match in self._STEP_PATH_RE.finditer(template_str):
+            full_path = match.group(1)
+            parts = full_path.split(".")
+            step_name = parts[0]
+            warn_key = f"steps.{full_path}"
+
+            if warn_key in self._warned_missing_steps:
+                continue
+
+            if step_name not in steps_data or not steps_data[step_name]:
+                # Suppress warning if the step's phase wasn't requested
+                step_phase = self._step_phases.get(step_name)
+                if self._requested_phases and step_phase and step_phase not in self._requested_phases:
+                    continue
+                self._warned_missing_steps.add(warn_key)
+                msg = f"step '{step_name}' has no output (not run?), using defaults for: steps.{full_path}"
+                logger.warning(msg)
+                self._context_warnings.append(msg)
+                continue
+
+            # Step has output — walk the path to check for missing fields
+            node = steps_data
+            for i, part in enumerate(parts):
+                if isinstance(node, dict) and part in node:
+                    node = node[part]
+                elif isinstance(node, dict):
+                    missing = parts[i]
+                    available = ", ".join(sorted(node.keys())) if node else "(empty)"
+                    self._warned_missing_steps.add(warn_key)
+                    msg = f"'{missing}' not found in steps.{'.'.join(parts[:i])} (available: {available})"
+                    logger.warning(msg)
+                    self._context_warnings.append(msg)
+                    break
+                else:
+                    self._warned_missing_steps.add(warn_key)
+                    msg = (
+                        f"cannot descend into steps.{'.'.join(parts[:i])} "
+                        f"(found {type(node).__name__}), using defaults for: steps.{full_path}"
+                    )
+                    logger.warning(msg)
+                    self._context_warnings.append(msg)
+                    break
 
     def render_dict(self, data: dict[str, Any]) -> dict[str, Any]:
         """Recursively render all string values in a dictionary.

@@ -49,7 +49,7 @@ system_node_desired_size   = 2
 # -----------------------------------------------------------------------------
 
 # Development configuration (1 small GPU node)
-gpu_node_instance_types = ["g5.xlarge"]  # 1x A10G, 24GB
+gpu_node_instance_types = ["g5.2xlarge"]  # 1x A10G, 32GB RAM (NIM requires 32GB)
 gpu_node_min_size       = 0
 gpu_node_max_size       = 2
 gpu_node_desired_size   = 1

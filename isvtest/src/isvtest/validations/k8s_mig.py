@@ -12,6 +12,8 @@ import json
 import shlex
 from typing import ClassVar
 
+import pytest
+
 from isvtest.core.k8s import get_kubectl_command
 from isvtest.core.validation import BaseValidation
 
@@ -48,21 +50,18 @@ class K8sMigConfigCheck(BaseValidation):
             name = node.get("metadata", {}).get("name", "unknown")
             labels = node.get("metadata", {}).get("labels", {})
 
-            # Check if node has any MIG labels
-            has_mig = any("nvidia.com/mig" in k for k in labels.keys())
+            # A node has MIG enabled when nvidia.com/mig.capable is explicitly "true"
+            mig_capable = labels.get("nvidia.com/mig.capable", "false")
+            has_mig = str(mig_capable).lower() == "true"
             if has_mig:
                 mig_nodes.append(name)
 
-            # Verify specific expected labels if configured
-            if expected_labels:
+            # Verify expected labels only on nodes that have MIG enabled,
+            # or on all nodes when require_mig is set.
+            if expected_labels and (require_mig or has_mig):
                 for key, expected_value in expected_labels.items():
-                    # Only check if the key exists or if we expect it to exist?
-                    # Generally, if we expect a label value, we expect the label to be there.
                     if key not in labels:
-                        # Only report missing label if we require MIG or if the node has other MIG labels
-                        # (Assuming mixed cluster: non-MIG nodes shouldn't fail this unless we target them specifically)
-                        if require_mig or has_mig:
-                            mismatch_nodes.append(f"{name} (missing label {key})")
+                        mismatch_nodes.append(f"{name} (missing label {key})")
                     elif str(labels[key]) != str(expected_value):
                         mismatch_nodes.append(f"{name} ({key}: {labels[key]} != {expected_value})")
 
@@ -79,4 +78,4 @@ class K8sMigConfigCheck(BaseValidation):
             if require_mig:
                 self.set_failed("No MIG labels found on any node")
             else:
-                self.set_passed("No MIG labels found (MIG not configured)")
+                pytest.skip("No MIG-capable nodes found (require_mig is false)")

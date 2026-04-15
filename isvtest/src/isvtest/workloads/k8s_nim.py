@@ -60,8 +60,9 @@ class K8sNimInferenceWorkload(BaseWorkloadCheck):
             self.set_passed("Skipped: No GPU nodes found in cluster")
             return
 
-        # Ensure PVC for model cache exists
-        self._ensure_pvc(namespace)
+        # Ensure PVC for model cache exists and is usable
+        if not self._ensure_pvc(namespace):
+            return
 
         # Generate unique job name
         job_name = f"nim-llama-3b-test-{uuid.uuid4().hex[:8]}"
@@ -132,20 +133,28 @@ class K8sNimInferenceWorkload(BaseWorkloadCheck):
             # Cleanup
             self.run_command(f"{kubectl_base} delete job {job_name} -n {namespace} --wait=false")
 
-    def _ensure_pvc(self, namespace: str) -> None:
-        """Ensure PVC for model cache exists."""
+    def _ensure_pvc(self, namespace: str) -> bool:
+        """Ensure PVC for model cache exists.
+
+        With ``WaitForFirstConsumer`` storage classes (e.g. EKS gp3), the PVC
+        stays Pending until a pod references it, so we only verify the resource
+        exists — not that it's Bound.
+
+        Returns:
+            True if PVC exists or was created, False on error.
+        """
         pvc_name = "nim-model-cache"
         kubectl_base = get_kubectl_base()
 
         res = self.run_command(f"{kubectl_base} get pvc {pvc_name} -n {namespace}")
         if res.exit_code == 0:
-            return
+            return True
 
         self.log.info(f"Creating PVC {pvc_name}...")
         pvc_path = Path(__file__).parent / "manifests" / "k8s" / "nim_cache_pvc.yaml"
         if not pvc_path.exists():
-            self.log.warning(f"PVC manifest not found: {pvc_path}")
-            return
+            self.set_failed(f"PVC manifest not found: {pvc_path}")
+            return False
 
         kubectl_parts = get_kubectl_command()
         try:
@@ -155,9 +164,13 @@ class K8sNimInferenceWorkload(BaseWorkloadCheck):
                 capture_output=True,
                 text=True,
                 timeout=30,
+                check=True,
             )
         except Exception as e:
-            self.log.warning(f"Failed to create PVC: {e}")
+            self.set_failed(f"Failed to create PVC: {e}")
+            return False
+
+        return True
 
     def _dump_nim_logs(self, job_name: str, namespace: str) -> None:
         """Dump logs from NIM containers for debugging."""

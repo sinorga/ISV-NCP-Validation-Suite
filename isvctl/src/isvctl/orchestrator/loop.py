@@ -19,7 +19,7 @@ import logging
 import shutil
 import tempfile
 import xml.etree.ElementTree as ET
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -67,11 +67,13 @@ class OrchestratorResult:
         success: Whether all phases succeeded
         phases: Results for each phase that was executed
         inventory: Final inventory data (step outputs)
+        context_warnings: Template/context warnings collected during orchestration
     """
 
     success: bool
     phases: list[PhaseResult]
     inventory: dict[str, Any] | None = None
+    context_warnings: list[str] = field(default_factory=list)
 
 
 def _merge_junit_xmls(phase_files: list[Path], output_path: Path) -> None:
@@ -279,6 +281,13 @@ class Orchestrator:
         # Build set of requested phase names for filtering
         requested_phase_names = {p.value for p in requested_phases}
 
+        # Tell context which phases were requested so it can suppress
+        # warnings for steps in intentionally skipped phases
+        if Phase.ALL in requested_phases:
+            self.context.set_requested_phases(set(config_phases))
+        else:
+            self.context.set_requested_phases(requested_phase_names)
+
         # Per-phase JUnit XML: use temp files per phase, merge at the end
         # This prevents later phases from overwriting earlier phases' results
         junit_tmpdir: str | None = None
@@ -393,6 +402,7 @@ class Orchestrator:
             success=overall_success,
             phases=phase_results,
             inventory=self.context.get_accumulated_context().get("steps", {}),
+            context_warnings=self.context.get_warnings(),
         )
 
     def _create_phase_result(

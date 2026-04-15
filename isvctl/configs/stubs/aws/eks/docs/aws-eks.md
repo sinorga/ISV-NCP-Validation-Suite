@@ -97,7 +97,7 @@ The setup phase uses Terraform to provision:
 
 - VPC with public/private subnets and NAT Gateway
 - EKS cluster (Kubernetes 1.32)
-- GPU node group (g5.xlarge by default)
+- GPU node group (g5.2xlarge by default)
 - System node group (m5.large)
 - NVIDIA GPU Operator
 - EFS storage for NIM model cache
@@ -160,7 +160,7 @@ uv run isvctl test run -f isvctl/configs/providers/aws/eks.yaml -f my-aws-config
 | `TF_VAR_cluster_name_prefix` | isv-gpu | Cluster name prefix |
 | `TF_VAR_environment` | dev | Environment suffix (cluster name = prefix-env) |
 | `TF_VAR_kubernetes_version` | 1.32 | EKS Kubernetes version |
-| `TF_VAR_gpu_node_instance_types` | ["g5.xlarge"] | GPU instance types (JSON array) |
+| `TF_VAR_gpu_node_instance_types` | ["g5.2xlarge"] | GPU instance types (JSON array) |
 | `TF_VAR_gpu_node_desired_size` | 1 | Number of GPU nodes |
 | `TF_VAR_system_node_instance_types` | ["m5.large"] | System node instance types |
 | `TF_VAR_system_node_desired_size` | 2 | Number of system nodes |
@@ -324,7 +324,7 @@ set -e
 # Configuration
 export NGC_API_KEY=nvapi-XXXXX
 export TF_VAR_region=us-west-2
-export TF_VAR_gpu_node_instance_types='["g5.xlarge"]'
+export TF_VAR_gpu_node_instance_types='["g5.2xlarge"]'
 export TF_VAR_gpu_node_desired_size=1
 
 # Run all phases: setup -> test -> teardown

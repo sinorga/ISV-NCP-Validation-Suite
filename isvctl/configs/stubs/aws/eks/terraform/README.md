@@ -23,6 +23,7 @@ This Terraform module deploys an AWS EKS cluster configured for GPU workloads an
 ### AWS Permissions
 
 Your AWS credentials need permissions for:
+
 - EKS cluster management
 - EC2 instances and Auto Scaling Groups
 - VPC, subnets, security groups
@@ -80,22 +81,25 @@ uv run isvctl test run -f isvctl/configs/providers/aws/eks.yaml
 ### Example Configurations
 
 **Development (minimal cost):**
+
 ```hcl
-gpu_node_instance_types = ["g5.xlarge"]
+gpu_node_instance_types = ["g5.2xlarge"]
 gpu_node_desired_size   = 1
 single_nat_gateway      = true
 enable_efs              = false  # Use node-local storage
 ```
 
 **Testing (balanced):**
+
 ```hcl
-gpu_node_instance_types = ["g5.xlarge"]
+gpu_node_instance_types = ["g5.2xlarge"]
 gpu_node_desired_size   = 2
 single_nat_gateway      = true
 enable_efs              = true
 ```
 
 **Production (high availability):**
+
 ```hcl
 gpu_node_instance_types = ["p4d.24xlarge"]
 gpu_node_desired_size   = 4
@@ -152,6 +156,7 @@ terraform destroy
 ```
 
 **Warning:** This will delete:
+
 - EKS cluster and all workloads
 - VPC and networking components
 - EFS file system and data
@@ -219,7 +224,7 @@ Approximate monthly costs (us-west-2, as of 2024):
 |-----------|---------------|-----------------|
 | EKS Control Plane | 1 cluster | $73 |
 | System Nodes | 2x m5.large | $140 |
-| GPU Nodes (g5.xlarge) | 1 node | $800 |
+| GPU Nodes (g5.2xlarge) | 1 node | $1,000 |
 | GPU Nodes (p4d.24xlarge) | 1 node | $24,000 |
 | NAT Gateway | 1 gateway | $45 + data |
 | EFS | 100GB | $30 |

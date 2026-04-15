@@ -102,13 +102,14 @@ variable "gpu_node_instance_types" {
     Instance types for GPU node group.
     Common options:
     - g4dn.xlarge   (1x T4, 16GB)     - Development, small models
-    - g5.xlarge     (1x A10G, 24GB)   - Development, medium models
+    - g5.xlarge     (1x A10G, 24GB)   - Development, small models (16GB RAM, no NIM)
+    - g5.2xlarge    (1x A10G, 24GB)   - Development, NIM inference (32GB RAM)
     - g5.12xlarge   (4x A10G, 24GB)   - Multi-GPU workloads
     - p4d.24xlarge  (8x A100, 40GB)   - Large models, training
     - p5.48xlarge   (8x H100, 80GB)   - LLM inference, training
   EOT
   type        = list(string)
-  default     = ["g5.xlarge"]
+  default     = ["g5.2xlarge"]
 }
 
 variable "gpu_node_min_size" {
