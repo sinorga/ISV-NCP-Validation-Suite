@@ -113,6 +113,8 @@ See [Remote Deployment Guide](guides/remote-deployment.md) for details.
 | `ISV_CLIENT_ID` | Required for result upload to ISV Lab Service |
 | `ISV_CLIENT_SECRET` | Required for result upload to ISV Lab Service |
 | `NGC_API_KEY` | Required for NIM model benchmarks |
+| `KUBECTL` | Optional kubectl-compatible CLI prefix (overrides auto-detection; for Kubernetes tests) |
+| `K8S_PROVIDER` | Kubernetes provider hint — `microk8s`, `k3s`, `minikube`, or `kubectl` (auto-detected if unset; overridden by `KUBECTL`) |
 
 ## Next Steps
 

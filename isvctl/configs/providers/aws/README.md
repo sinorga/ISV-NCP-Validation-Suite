@@ -7,7 +7,7 @@ Provider configs that wire the [provider-agnostic test suites](../../tests/READM
 | Config | Domain | Guide |
 |--------|--------|-------|
 | [`iam.yaml`](iam.yaml) | User lifecycle (create → verify → delete) | [AWS IAM Guide](../../stubs/aws/iam/docs/aws-iam.md) |
-| [`network.yaml`](network.yaml) | VPC CRUD, subnets, isolation, security, connectivity | [AWS Network Guide](../../stubs/aws/network/docs/aws-network.md) |
+| [`network.yaml`](network.yaml) | VPC CRUD, subnets, isolation, SG CRUD, security, connectivity | [AWS Network Guide](../../stubs/aws/network/docs/aws-network.md) |
 | [`vm.yaml`](vm.yaml) | GPU VM lifecycle (launch → stop/start → reboot → NIM) | [AWS VM Guide](../../stubs/aws/vm/docs/aws-vm.md) |
 | [`bare_metal.yaml`](bare_metal.yaml) | BMaaS lifecycle (launch → topology → serial → NIM) | [AWS Bare Metal Guide](../../stubs/aws/bare_metal/docs/aws-bm.md) |
 | [`eks.yaml`](eks.yaml) | Kubernetes GPU cluster (nodes, GPU operator, workloads) | [AWS EKS Guide](../../stubs/aws/eks/docs/aws-eks.md) |

@@ -9,7 +9,7 @@ internal `isvtest` engine and provides:
 
 1. **Setup**: Run inventory stubs that query or setup clusters
 2. **Test**: Execute validation tests against the cluster
-3. **Teardown**: Clean up (optional)
+3. **Teardown**: Clean up resources (runs by default, even after test failures; see [teardown behavior](../guides/external-validation-guide.md#running-validations))
 
 ## Installation
 
@@ -77,6 +77,9 @@ isvctl test run -f isvctl/configs/tests/k8s.yaml
 
 # Run only the test phase (skip inventory query)
 isvctl test run -f isvctl/configs/tests/k8s.yaml --phase test
+
+# Run only teardown (cleanup from a previous run)
+isvctl test run -f isvctl/configs/tests/k8s.yaml --phase teardown
 
 # Dry run - validate config without executing
 isvctl test run -f isvctl/configs/tests/k8s.yaml --dry-run

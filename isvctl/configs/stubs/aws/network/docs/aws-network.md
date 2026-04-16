@@ -4,13 +4,14 @@ This guide provides a complete walkthrough for validating AWS VPC networking cap
 
 ## Overview
 
-The network validation suite includes 13 comprehensive test suites:
+The network validation suite includes 14 comprehensive test suites:
 
 | Test Suite | Duration | Description |
 |------------|----------|-------------|
 | **VPC CRUD** | ~30s | Create, read, update, delete VPC lifecycle |
 | **Subnet Config** | ~30s | Multi-AZ subnet distribution and route tables |
 | **VPC Isolation** | ~30s | Security boundaries between separate VPCs |
+| **SG CRUD** | ~30s | Security group create, read, update rules, delete lifecycle |
 | **Security Blocking** | ~30s | SG/NACL blocking rules (negative tests) |
 | **Connectivity** | ~3 min | Instance network assignment via SSM |
 | **Traffic Validation** | ~5-7 min | Real ping tests - allowed/blocked traffic |
@@ -46,6 +47,7 @@ The network validation suite includes 13 comprehensive test suites:
 │  │ vpc_crud_test.py       │───▶│ VpcCrudCheck             │     │
 │  │ subnet_test.py         │───▶│ SubnetConfigCheck        │     │
 │  │ isolation_test.py      │───▶│ VpcIsolationCheck        │     │
+│  │ sg_crud_test.py        │───▶│ SgCrudCheck              │     │
 │  │ security_test.py       │───▶│ SecurityBlockingCheck    │     │
 │  │ test_connectivity.py   │───▶│ NetworkConnectivityCheck │     │
 │  │ traffic_test.py        │───▶│ TrafficFlowCheck         │     │
@@ -101,6 +103,7 @@ All scripts are located in `isvctl/configs/stubs/aws/network/`:
 | `vpc_crud_test.py` | VPC create/read/update/delete | `vpc_crud` |
 | `subnet_test.py` | Multi-AZ subnet configuration | `subnet_config` |
 | `isolation_test.py` | VPC isolation verification | `vpc_isolation` |
+| `sg_crud_test.py` | Security group CRUD lifecycle | `sg_crud` |
 | `security_test.py` | SG/NACL blocking rules | `security_blocking` |
 | `test_connectivity.py` | Instance connectivity via SSM | `connectivity_result` |
 | `traffic_test.py` | Real ping traffic tests | `traffic_flow` |
@@ -194,7 +197,19 @@ Verifies security boundaries between VPCs:
 - Check route tables don't reference other VPC
 - Validate default security groups block cross-VPC traffic
 
-### 4. Security Blocking Check (Negative Tests)
+### 4. Security Group CRUD Check
+
+**Script**: `sg_crud_test.py`
+**Validation**: `SgCrudCheck`
+
+Tests the complete security group lifecycle:
+
+- Create security group with description and tags
+- Read security group attributes
+- Update security group rules (add/remove ingress and egress rules)
+- Delete security group and verify removal
+
+### 5. Security Blocking Check (Negative Tests)
 
 **Script**: `security_test.py`
 **Validation**: `SecurityBlockingCheck`
@@ -207,7 +222,7 @@ Tests that security rules correctly **block** traffic:
 - **NACL explicit deny**: Creates NACL with explicit deny rule
 - **Restricted egress**: Creates SG with HTTPS-only outbound
 
-### 5. Connectivity Check
+### 6. Connectivity Check
 
 **Script**: `test_connectivity.py`
 **Validation**: `NetworkConnectivityCheck`
@@ -220,7 +235,7 @@ Tests instance network connectivity:
 - Tests ping between instances
 - Tests internet connectivity
 
-### 6. Traffic Validation Check
+### 7. Traffic Validation Check
 
 **Script**: `traffic_test.py`
 **Validation**: `TrafficFlowCheck`
@@ -236,7 +251,7 @@ The most comprehensive test - sends real network traffic:
 - Tests internet ICMP (ping 8.8.8.8)
 - Tests internet HTTPS (curl checkip.amazonaws.com)
 
-### 7. VPC IP Configuration Check (DDI)
+### 8. VPC IP Configuration Check (DDI)
 
 **Script**: `vpc_ip_config_test.py`
 **Validation**: `VpcIpConfigCheck`
@@ -248,7 +263,7 @@ Tests IP address management configuration on the shared VPC:
 - Verify auto-assign public IP settings
 - Check DHCP options set (domain name servers, domain name)
 
-### 8. DHCP IP Management Check (DDI)
+### 9. DHCP IP Management Check (DDI)
 
 **Script**: `dhcp_ip_test.py`
 **Validation**: `DhcpIpManagementCheck`
@@ -260,7 +275,7 @@ Tests DHCP-assigned IP management via SSH on a live instance:
 - Check assigned IP matches AWS metadata
 - Verify DNS options are configured correctly
 
-### 9. BYOIP Check
+### 10. BYOIP Check
 
 **Script**: `byoip_test.py`
 **Validation**: `ByoipCheck`
@@ -273,7 +288,7 @@ Tests Bring-Your-Own-IP with non-standard CIDR ranges:
 - Verify subnets can be created in custom CIDR ranges
 - Clean up both VPCs
 
-### 10. Stable Private IP Check
+### 11. Stable Private IP Check
 
 **Script**: `stable_ip_test.py`
 **Validation**: `StablePrivateIpCheck`
@@ -285,7 +300,7 @@ Tests that private IPs persist across instance stop/start cycles:
 - Stop instance, then start it
 - Verify private IP is unchanged after restart
 
-### 11. Floating IP Check
+### 12. Floating IP Check
 
 **Script**: `floating_ip_test.py`
 **Validation**: `FloatingIpCheck`
@@ -298,7 +313,7 @@ Tests atomic IP reassignment between instances:
 - Verify switch completes within the `max_switch_seconds` threshold (default 10s)
 - Clean up all resources
 
-### 12. Localized DNS Check
+### 13. Localized DNS Check
 
 **Script**: `dns_test.py`
 **Validation**: `LocalizedDnsCheck`
@@ -310,7 +325,7 @@ Tests custom internal domain resolution via Route 53 private hosted zones:
 - Verify forward resolution works from within the VPC
 - Clean up hosted zone and VPC
 
-### 13. VPC Peering Check
+### 14. VPC Peering Check
 
 **Script**: `peering_test.py`
 **Validation**: `VpcPeeringCheck`
@@ -417,7 +432,8 @@ commands:
       - name: vpc_crud             # Test 1: VPC CRUD (~30s)
       - name: subnet_config        # Test 2: Subnet Config (~30s)
       - name: vpc_isolation         # Test 3: VPC Isolation (~30s)
-      - name: security_blocking     # Test 4: Security Blocking (~30s)
+      - name: sg_crud               # Test 4a: SG CRUD (~30s)
+      - name: security_blocking     # Test 4b: Security Blocking (~30s)
       - name: connectivity_test     # Test 5: Connectivity (~3 min)
       - name: traffic_validation    # Test 6: Traffic Validation (~5-7 min)
       - name: vpc_ip_config         # Test 7: VPC IP Config - DDI (~10s)
@@ -459,13 +475,14 @@ ORCHESTRATION RESULTS
 ============================================================
 [PASS] SETUP   : create_network: passed
   [create_network] NetworkProvisionedCheck: PASSED - Network vpc-xxx provisioned: CIDR=10.0.0.0/16, subnets=2
-[PASS] TEST    : vpc_crud: passed; subnet_config: passed; vpc_isolation: passed; security_blocking: passed;
-                 connectivity_test: passed; traffic_validation: passed; vpc_ip_config: passed;
-                 dhcp_ip_test: passed; byoip_test: passed; stable_ip_test: passed;
-                 floating_ip_test: passed; dns_test: passed; peering_test: passed
+[PASS] TEST    : vpc_crud: passed; subnet_config: passed; vpc_isolation: passed; sg_crud: passed;
+                 security_blocking: passed; connectivity_test: passed; traffic_validation: passed;
+                 vpc_ip_config: passed; dhcp_ip_test: passed; byoip_test: passed;
+                 stable_ip_test: passed; floating_ip_test: passed; dns_test: passed; peering_test: passed
   [vpc_crud] VpcCrudCheck: PASSED - All 5 CRUD tests passed
   [subnet_config] SubnetConfigCheck: PASSED - 4 subnets across 2 AZs
   [vpc_isolation] VpcIsolationCheck: PASSED - VPCs vpc-a and vpc-b are properly isolated
+  [sg_crud] SgCrudCheck: PASSED - All 4 SG CRUD operations passed
   [security_blocking] SecurityBlockingCheck: PASSED - All 5 security blocking tests passed
   [connectivity_test] NetworkConnectivityCheck: PASSED - 2 instances with network connectivity
   [traffic_validation] TrafficFlowCheck: PASSED - All 4 traffic tests passed (latency: 0.5ms)

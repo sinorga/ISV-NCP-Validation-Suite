@@ -7,18 +7,20 @@ Validates AWS EC2 bare-metal GPU instances using the ISV validation framework.
 The AWS BM validation tests verify:
 
 1. **Instance Lifecycle** - Provisioning, state verification, instance listing
-2. **Topology Placement** - Placement group support (cluster strategy)
-3. **Serial Console** - Console output accessibility
-4. **Image Registry** - OS image verification, install config validation (cross-domain)
-5. **SSH Access** - Remote connectivity via SSH, cloud-init completion
-6. **Host OS Validation** - Kernel, BIOS, NVIDIA drivers
-7. **GPU Tests** - GPU visibility, stress, NCCL, training, NVLink
-8. **Networking** - InfiniBand, Ethernet connectivity
-9. **Stop/Start Resilience** - Power off, power on, SSH/GPU re-validation
-10. **Reboot Resilience** - Instance reboot, recovery, full host OS persistence
-11. **Reinstall** - OS reinstall from stock image (skipped by default)
-12. **NIM Inference** - NIM container deployment, health, model listing, inference
-13. **Sanitization** - Resource cleanup verification after teardown
+2. **Tag Validation** - Instance tag verification (Name, CreatedBy)
+3. **Topology Placement** - Placement group support (cluster strategy)
+4. **Serial Console** - Console output accessibility
+5. **Image Registry** - OS image verification, install config validation (cross-domain)
+6. **SSH Access** - Remote connectivity via SSH, cloud-init completion
+7. **Host OS Validation** - Kernel, BIOS, NVIDIA drivers
+8. **GPU Tests** - GPU visibility, stress, NCCL, training, NVLink
+9. **Networking** - InfiniBand, Ethernet connectivity
+10. **Stop/Start Resilience** - Power off, power on, SSH/GPU re-validation, stable instance ID
+11. **Reboot Resilience** - Instance reboot, recovery, full host OS persistence, stable instance ID
+12. **Power-Cycle Resilience** - Force stop + start, recovery, SSH/GPU re-validation, stable instance ID
+13. **Reinstall** - OS reinstall from stock image (skipped by default)
+14. **NIM Inference** - NIM container deployment, health, model listing, inference
+15. **Sanitization** - Resource cleanup verification after teardown
 
 ## Prerequisites
 
@@ -62,22 +64,24 @@ uv run isvctl test run -f isvctl/configs/providers/aws/bare_metal.yaml -- -k "re
 |---|------|-------|--------|-------------|
 | 1 | `launch_instance` | setup | `stubs/aws/bare_metal/launch_instance.py` | Provision bare-metal GPU instance |
 | 2 | `list_instances` | test | `stubs/aws/vm/list_instances.py` | List instances in VPC (reuses VM script) |
-| 3 | `topology_placement` | test | `stubs/aws/bare_metal/topology_placement.py` | Validate placement group support |
-| 4 | `serial_console` | test | `stubs/aws/bare_metal/serial_console.py` | Retrieve serial console output |
-| 5 | `verify_image` | test | `stubs/aws/image-registry/verify_image_installed.py` | Verify OS image installed on BM |
-| 6 | `verify_config` | test | `stubs/aws/image-registry/verify_config_installable.py` | Verify install config can provision BM |
-| 7 | `stop_instance` | test | `stubs/aws/bare_metal/stop_instance.py` | Power off node, verify stopped state |
-| 8 | `start_instance` | test | `stubs/aws/bare_metal/start_instance.py` | Power on node, verify recovery |
-| 9 | `describe_instance` | test | `stubs/aws/bare_metal/describe_instance.py` | Describe post-start state + SSH info |
+| 3 | `verify_tags` | test | `stubs/aws/bare_metal/describe_tags.py` | Verify instance tags (Name, CreatedBy) |
+| 4 | `topology_placement` | test | `stubs/aws/bare_metal/topology_placement.py` | Validate placement group support |
+| 5 | `serial_console` | test | `stubs/aws/bare_metal/serial_console.py` | Retrieve serial console output |
+| 6 | `verify_image` | test | `stubs/aws/image-registry/verify_image_installed.py` | Verify OS image installed on BM |
+| 7 | `verify_config` | test | `stubs/aws/image-registry/verify_config_installable.py` | Verify install config can provision BM |
+| 8 | `stop_instance` | test | `stubs/aws/bare_metal/stop_instance.py` | Power off node, verify stopped state |
+| 9 | `start_instance` | test | `stubs/aws/bare_metal/start_instance.py` | Power on node, verify recovery |
 | 10 | `reboot_instance` | test | `stubs/aws/bare_metal/reboot_instance.py` | Reboot instance, validate recovery |
-| 11 | `reinstall_instance` | test | `stubs/aws/bare_metal/reinstall_instance.py` | Reinstall OS (skip: true by default) |
-| 12 | `deploy_nim` | test | `stubs/common/deploy_nim.py` | Deploy NIM container via SSH |
-| 13 | `teardown_nim` | teardown | `stubs/common/teardown_nim.py` | Stop NIM container |
-| 14 | `teardown` | teardown | `stubs/aws/bare_metal/teardown.py` | Terminate instance, delete resources |
-| 15 | `verify_teardown` | teardown | `stubs/aws/bare_metal/verify_terminated.py` | Confirm instance terminated + SG deleted |
+| 11 | `power_cycle_instance` | test | `stubs/aws/bare_metal/power_cycle_instance.py` | Force stop + start, validate recovery |
+| 12 | `describe_instance` | test | `stubs/aws/bare_metal/describe_instance.py` | Describe post-power-cycle state + SSH info |
+| 13 | `reinstall_instance` | test | `stubs/aws/bare_metal/reinstall_instance.py` | Reinstall OS (skip: true by default) |
+| 14 | `deploy_nim` | test | `stubs/common/deploy_nim.py` | Deploy NIM container via SSH |
+| 15 | `teardown_nim` | teardown | `stubs/common/teardown_nim.py` | Stop NIM container |
+| 16 | `teardown` | teardown | `stubs/aws/bare_metal/teardown.py` | Terminate instance, delete resources |
+| 17 | `verify_teardown` | teardown | `stubs/aws/bare_metal/verify_terminated.py` | Confirm instance terminated + SG deleted |
 
-Steps 5-6 (`verify_image`, `verify_config`) cross-reference the image-registry domain to validate
-BM provisioning from OS images. Step 11 (`reinstall_instance`) is skipped by default because
+Steps 6-7 (`verify_image`, `verify_config`) cross-reference the image-registry domain to validate
+BM provisioning from OS images. Step 13 (`reinstall_instance`) is skipped by default because
 root volume replacement is slow on AWS metal (~30-45 min).
 
 ## Validations
@@ -86,6 +90,7 @@ root volume replacement is slow on AWS metal (~30-45 min).
 |------------------|-------|------|-------------|
 | `setup_checks` | `InstanceStateCheck` | launch_instance | Instance is running |
 | `list_instances` | `InstanceListCheck` | list_instances | Target instance found in VPC |
+| `tag_checks` | `InstanceTagCheck` | verify_tags | Instance has required tags (Name, CreatedBy) |
 | `topology_placement` | `TopologyPlacementCheck` | topology_placement | Placement group CRUD operations |
 | `serial_console` | `SerialConsoleCheck` | serial_console | Console output available |
 | `cloud_init` | `CloudInitCheck` | launch_instance | Cloud-init completed |
@@ -102,14 +107,18 @@ root volume replacement is slow on AWS metal (~30-45 min).
 | `infiniband` | `InfiniBandCheck` | describe_instance | InfiniBand device presence |
 | `ethernet` | `EthernetCheck` | describe_instance | Network connectivity (ping 8.8.8.8) |
 | `stop_checks` | `InstanceStopCheck` | stop_instance | Power-off confirmed |
-| `start_checks` | `InstanceStartCheck` | start_instance | Power-on confirmed |
+| `start_checks` | `InstanceStartCheck`, `StableIdentifierCheck` | start_instance | Power-on confirmed, instance ID stable |
 | `start_ssh` | `ConnectivityCheck`, `OsCheck` | start_instance | SSH works after start |
 | `start_gpu` | `GpuCheck` | start_instance | GPUs visible after start (8 GPUs) |
-| `reboot_checks` | `InstanceRebootCheck` | reboot_instance | Reboot confirmed (uptime < 600s) |
+| `reboot_checks` | `InstanceRebootCheck`, `StableIdentifierCheck` | reboot_instance | Reboot confirmed, instance ID stable |
 | `reboot_state` | `InstanceStateCheck` | reboot_instance | Instance running after reboot |
 | `reboot_ssh` | `ConnectivityCheck`, `OsCheck` | reboot_instance | SSH works after reboot |
 | `reboot_gpu` | `GpuCheck` | reboot_instance | GPUs visible after reboot (8 GPUs) |
 | `reboot_host_os` | `HostSoftwareCheck` | reboot_instance | Host OS persisted after reboot |
+| `power_cycle_checks` | `InstancePowerCycleCheck`, `StableIdentifierCheck` | power_cycle_instance | Power-cycle recovery, instance ID stable |
+| `power_cycle_state` | `InstanceStateCheck` | power_cycle_instance | Instance running after power-cycle |
+| `power_cycle_ssh` | `ConnectivityCheck`, `OsCheck` | power_cycle_instance | SSH works after power-cycle |
+| `power_cycle_gpu` | `GpuCheck` | power_cycle_instance | GPUs visible after power-cycle |
 | `reinstall_state` | `InstanceStateCheck` | reinstall_instance | Running after reinstall (if enabled) |
 | `reinstall_ssh` | `ConnectivityCheck`, `OsCheck` | reinstall_instance | SSH works after reinstall |
 | `reinstall_gpu` | `GpuCheck` | reinstall_instance | GPUs visible after reinstall |

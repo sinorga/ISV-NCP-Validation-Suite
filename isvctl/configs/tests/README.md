@@ -37,9 +37,9 @@ commands:
 | Test Suite | Domain | Stubs | AWS Reference |
 |------------|--------|-------|---------------|
 | [`iam.yaml`](iam.yaml) | User lifecycle (create → verify → delete) | [`stubs/iam/`](../stubs/iam/) (3 scripts) | [`providers/aws/iam.yaml`](../providers/aws/iam.yaml) |
-| [`network.yaml`](network.yaml) | VPC CRUD, subnets, isolation, security, connectivity, traffic, DDI, SDN | [`stubs/network/`](../stubs/network/) (15 scripts) | [`providers/aws/network.yaml`](../providers/aws/network.yaml) |
+| [`network.yaml`](network.yaml) | VPC CRUD, subnets, isolation, SG CRUD, security, connectivity, traffic, DDI, SDN | [`stubs/network/`](../stubs/network/) (16 scripts) | [`providers/aws/network.yaml`](../providers/aws/network.yaml) |
 | [`vm.yaml`](vm.yaml) | GPU VM lifecycle: launch → tags → stop/start → reboot → NIM → teardown | [`stubs/vm/`](../stubs/vm/) (8 scripts) | [`providers/aws/vm.yaml`](../providers/aws/vm.yaml) |
-| [`bare_metal.yaml`](bare_metal.yaml) | BMaaS lifecycle: launch → topology → serial → stop/start → reboot → NIM → teardown | [`stubs/bare_metal/`](../stubs/bare_metal/) (9 scripts) | [`providers/aws/bare_metal.yaml`](../providers/aws/bare_metal.yaml) |
+| [`bare_metal.yaml`](bare_metal.yaml) | BMaaS lifecycle: launch → tags → topology → serial → stop/start → reboot → power-cycle → NIM → teardown | [`stubs/bare_metal/`](../stubs/bare_metal/) (13 scripts) | [`providers/aws/bare_metal.yaml`](../providers/aws/bare_metal.yaml) |
 | [`k8s.yaml`](k8s.yaml) | Kubernetes GPU cluster: nodes, GPU operator, scheduling, workloads | [`stubs/k8s/`](../stubs/k8s/) (2 scripts) | [`providers/aws/eks.yaml`](../providers/aws/eks.yaml) |
 | [`slurm.yaml`](slurm.yaml) | Slurm HPC cluster: partitions, jobs, GPU allocation | [`stubs/slurm/`](../stubs/slurm/) (2 scripts) | — |
 | [`control-plane.yaml`](control-plane.yaml) | API health, access key lifecycle, tenant lifecycle | [`stubs/control-plane/`](../stubs/control-plane/) (10 scripts) | [`providers/aws/control-plane.yaml`](../providers/aws/control-plane.yaml) |
@@ -63,6 +63,7 @@ commands:
 | `vpc_crud` | test | `stubs/network/vpc_crud_test.py` | Create/Read/Update/Delete lifecycle |
 | `subnet_config` | test | `stubs/network/subnet_test.py` | Multi-AZ subnet distribution |
 | `vpc_isolation` | test | `stubs/network/isolation_test.py` | Security boundaries between VPCs |
+| `sg_crud` | test | `stubs/network/sg_crud_test.py` | Security group create/read/update/delete lifecycle |
 | `security_blocking` | test | `stubs/network/security_test.py` | Firewall/ACL blocking rules |
 | `connectivity_test` | test | `stubs/network/test_connectivity.py` | Instance network assignment |
 | `traffic_validation` | test | `stubs/network/traffic_test.py` | Ping allowed/blocked, internet |
@@ -96,12 +97,14 @@ commands:
 |------|-------|--------|-----------------|
 | `launch_instance` | setup | `stubs/bare_metal/launch_instance.py` | `instance_id`, `public_ip`, `key_file`, `vpc_id` |
 | `list_instances` | test | `stubs/vm/list_instances.py` | Reuses VM script |
+| `verify_tags` | test | `stubs/bare_metal/describe_tags.py` | `instance_id`, `tags`, `tag_count` |
 | `topology_placement` | test | `stubs/bare_metal/topology_placement.py` | `placement_supported`, `operations` |
 | `serial_console` | test | `stubs/bare_metal/serial_console.py` | `console_available`, `serial_access_enabled` |
 | `stop_instance` | test | `stubs/bare_metal/stop_instance.py` | `instance_id`, `state`, `stop_initiated` |
 | `start_instance` | test | `stubs/bare_metal/start_instance.py` | `instance_id`, `state`, `public_ip`, `ssh_ready` |
-| `describe_instance` | test | `stubs/bare_metal/describe_instance.py` | `instance_state`, `public_ip`, `key_file` |
 | `reboot_instance` | test | `stubs/bare_metal/reboot_instance.py` | `uptime_seconds`, `ssh_connectivity` |
+| `power_cycle_instance` | test | `stubs/bare_metal/power_cycle_instance.py` | `instance_id`, `state`, `public_ip`, `ssh_ready` |
+| `describe_instance` | test | `stubs/bare_metal/describe_instance.py` | `instance_state`, `public_ip`, `key_file` |
 | `reinstall_instance` | test | `stubs/bare_metal/reinstall_instance.py` | `instance_state` (skipped by default) |
 | `deploy_nim` | test | `stubs/common/deploy_nim.py` | Shared NIM deployment |
 | `teardown_nim` | teardown | `stubs/common/teardown_nim.py` | Shared NIM cleanup |
@@ -115,7 +118,7 @@ commands:
 | `setup` | setup | `stubs/k8s/setup.sh` |
 | `teardown` | teardown | `stubs/k8s/teardown.sh` |
 
-Validations use `kubectl` directly: node counts, GPU operator, pod health, NCCL/NIM workloads.
+Validations use `kubectl` directly (or a custom CLI via the `KUBECTL` env var): node counts, GPU operator, pod health, NCCL/NIM workloads.
 
 ### Slurm (`slurm.yaml`)
 

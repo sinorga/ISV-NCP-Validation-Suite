@@ -80,9 +80,15 @@ The framework uses a **step-based execution model** where:
 2. **Scripts output JSON** - All operations output structured JSON to stdout
 3. **Validations check JSON** - Simple assertions verify the JSON output
 
-```
+```text
 Config (YAML) -> Script (any language) -> JSON output -> Validations (assertions)
 ```
+
+**Lifecycle phases** run in order: `setup -> test -> teardown`. Key behaviors:
+
+- **Teardown runs after failures** - If setup or test validations fail, teardown still executes so cloud resources are cleaned up
+- **Best-effort teardown** - Individual teardown step failures don't block remaining teardown steps
+- **Standalone teardown** - `isvctl test run -f config.yaml --phase teardown` runs cleanup independently (e.g., after a previous `AWS_SKIP_TEARDOWN` run)
 
 **Benefits:**
 
@@ -99,10 +105,10 @@ Config (YAML) -> Script (any language) -> JSON output -> Validations (assertions
 
 - `cli/` - Subcommand implementations (test, deploy, clean, docs, report)
 - `orchestrator/` - Lifecycle orchestration engine
-  - `loop.py` - Main orchestration loop (setup -> test -> teardown phases)
-  - `step_executor.py` - Step execution and validation orchestration (delegates to pytest)
+  - `loop.py` - Main orchestration loop (setup -> test -> teardown phases); teardown runs even after earlier phase failures and uses best-effort execution
+  - `step_executor.py` - Step execution and validation orchestration (delegates to pytest); supports `best_effort` mode for teardown
   - `commands.py` - Command execution with timeout handling
-  - `context.py` - Jinja2 templating context for config variables and step outputs
+  - `context.py` - Jinja2 templating context for config variables and step outputs; warns when templates reference missing step data or fields (catches `ChainableUndefined` silent fallbacks)
 - `config/` - Configuration schema and validation
   - `schema.py` - Pydantic models for config structure (including StepConfig)
   - `output_schemas.py` - JSON schema definitions for step outputs (auto-detection + validation)
@@ -116,12 +122,13 @@ Config (YAML) -> Script (any language) -> JSON output -> Validations (assertions
 **Configuration Files**: Located in `isvctl/configs/tests/` (test definitions) and `isvctl/configs/providers/` (provider implementations)
 
 - Configs define step-based commands with phases and validations
-- Support Jinja2 templating: `"{{steps.create_network.vpc_id}}"`, `"{{region}}"`
+- Support Jinja2 templating: `"{{steps.create_network.vpc_id}}"`, `"{{region}}"` — the orchestrator warns when templates reference steps that haven't run or fields that don't exist, helping catch typos and rename mismatches
 - Multiple configs can be merged with later files overriding earlier ones
 
 **Stubs (ISV Scripts)**: Located in `isvctl/configs/stubs/`
 
 - Platform setup/teardown shell scripts: `stubs/k8s/setup.sh`, `stubs/slurm/setup.sh`, etc.
+- Tag verification scripts: `stubs/vm/describe_tags.py`, `stubs/bare_metal/describe_tags.py`
 - AWS Python scripts organized by domain: `stubs/aws/network/`, `stubs/aws/vm/`, `stubs/aws/iam/`, etc.
 - Shared AWS utilities: `stubs/aws/common/` (error handling, EC2 helpers, VPC helpers)
 - Each script is self-contained and can be run manually for debugging
@@ -154,10 +161,10 @@ Organized by category:
 
 - `generic.py` - `StepSuccessCheck`, `FieldExistsCheck`, `FieldValueCheck`, `SchemaValidation`
 - `cluster.py` - `ClusterHealthCheck`, `NodeCountCheck`, `GpuOperatorInstalledCheck`, `PerformanceCheck`
-- `instance.py` - `InstanceStateCheck`, `InstanceCreatedCheck`, `InstanceRebootCheck`
-- `network.py` - `NetworkProvisionedCheck`, `VpcCrudCheck`, `SubnetConfigCheck`, `SecurityBlockingCheck`, etc.
+- `instance.py` - `InstanceStateCheck`, `InstanceCreatedCheck`, `InstanceRebootCheck`, `InstancePowerCycleCheck`, `StableIdentifierCheck`, etc.
+- `network.py` - `NetworkProvisionedCheck`, `VpcCrudCheck`, `SubnetConfigCheck`, `SgCrudCheck`, `SecurityBlockingCheck`, etc.
 - `iam.py` - `AccessKeyCreatedCheck`, `TenantCreatedCheck`, etc.
-- `host.py` - Host-level validations (connectivity, OS, CPU, GPU, drivers, containers)
+- `host.py` - Host-level validations (connectivity, OS, CPU, GPU, drivers, containers, cloud-init/metadata with optional `metadata_headers` for non-AWS providers)
 - `ssh_helpers.py` - SSH connection and utility helpers (used by `host.py`)
 - `k8s_*.py` - Kubernetes-specific validations (nodes, GPU operator, scheduling, MIG)
 - `slurm_*.py` - Slurm-specific validations (partitions, jobs, GPU allocation)

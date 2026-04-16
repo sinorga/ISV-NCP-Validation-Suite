@@ -198,6 +198,9 @@ isvctl test run -f config.yaml -v
 # Run specific phase
 isvctl test run -f config.yaml --phase setup
 
+# Run only teardown (cleanup from a previous run)
+isvctl test run -f config.yaml --phase teardown
+
 # Merge configs (later overrides earlier)
 isvctl test run -f base.yaml -f overrides.yaml
 
@@ -209,6 +212,8 @@ isvctl test run -f config.yaml -- -m "not slow"
 # Debug: full output on failure
 isvctl test run -f config.yaml -v -- -s --tb=long
 ```
+
+> **Teardown behavior:** By default, teardown runs even when setup or test validations fail, ensuring cloud resources are cleaned up. Individual teardown step failures don't block remaining teardown steps (best-effort execution).
 
 ---
 
@@ -252,7 +257,7 @@ For common validation scenarios, **pre-built test suites** are available in [`is
 | [`iam.yaml`](../../isvctl/configs/tests/iam.yaml) | User create → verify credentials → delete | 3 scripts |
 | [`network.yaml`](../../isvctl/configs/tests/network.yaml) | VPC CRUD, subnets, isolation, security, connectivity, traffic | 8 scripts |
 | [`vm.yaml`](../../isvctl/configs/tests/vm.yaml) | Launch GPU VM → list → reboot → NIM deploy → teardown | 4 scripts + 2 shared |
-| [`bare_metal.yaml`](../../isvctl/configs/tests/bare_metal.yaml) | Launch bare-metal → describe → reboot → NIM → teardown → verify | 5 scripts + 2 shared |
+| [`bare_metal.yaml`](../../isvctl/configs/tests/bare_metal.yaml) | Launch bare-metal → tags → topology → stop/start → reboot → power-cycle → NIM → teardown | 13 scripts + 2 shared |
 | [`k8s.yaml`](../../isvctl/configs/tests/k8s.yaml) | Provision K8s GPU cluster → validate nodes/GPU/workloads → teardown | 2 scripts |
 | [`control-plane.yaml`](../../isvctl/configs/tests/control-plane.yaml) | API health, access key lifecycle, tenant lifecycle | 10 scripts |
 | [`image-registry.yaml`](../../isvctl/configs/tests/image-registry.yaml) | Image upload → VM launch → install config CRUD → BMaaS install → teardown | 6 scripts |

@@ -315,6 +315,8 @@ steps:
 | `{{env.VAR_NAME}}` | Environment variable |
 | `{{steps.name.field}}` | Step output field |
 
+> **Template warnings:** The orchestrator logs warnings when a template references a step that hasn't run or a field that doesn't exist in the step output. This catches typos, renames, and missing data that Jinja2's `ChainableUndefined` would otherwise silently absorb. Warnings are suppressed for steps in phases that were intentionally skipped (e.g., `--phase teardown`).
+
 ## Script Output and Schema Validation
 
 Scripts must output valid JSON to stdout. The output is validated against schemas defined in `output_schemas.py`.
@@ -537,7 +539,7 @@ Below is a summary by category.
 | `GpuCheck` | Validates GPU via SSH |
 | `DriverCheck` | Validates kernel and NVIDIA drivers |
 | `ContainerRuntimeCheck` | Tests container runtime and NVIDIA Docker support |
-| `CloudInitCheck` | Validates cloud-init completed and metadata service is reachable |
+| `CloudInitCheck` | Validates cloud-init completed and metadata service is reachable (supports non-AWS providers; see [isvtest docs](../packages/isvtest.md#available-validations) for `metadata_headers` and `metadata_url` options) |
 | `GpuStressCheck` | GPU stress test via SSH |
 | `NcclCheck` | NCCL AllReduce test via SSH |
 | `TrainingCheck` | DDP training workload via SSH |

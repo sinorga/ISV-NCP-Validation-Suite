@@ -125,7 +125,7 @@ SSH-based host validations for GPU, driver, OS, networking, and workloads.
 | `GpuCheck` | vm, bare_metal | Validates GPU via SSH |
 | `DriverCheck` | vm, bare_metal | Validates kernel and NVIDIA drivers |
 | `ContainerRuntimeCheck` | vm, bare_metal | Tests container runtime and NVIDIA Docker support |
-| `CloudInitCheck` | vm, bare_metal | Validates cloud-init completed and metadata service is reachable |
+| `CloudInitCheck` | vm, bare_metal | Validates cloud-init completed and metadata service is reachable. Supports `metadata_headers` (custom HTTP headers for non-AWS providers) and optional `metadata_url` override |
 | `GpuStressCheck` | bare_metal | GPU stress test via SSH |
 | `NcclCheck` | bare_metal | NCCL AllReduce test via SSH |
 | `TrainingCheck` | bare_metal | DDP training workload via SSH |

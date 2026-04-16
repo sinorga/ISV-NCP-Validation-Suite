@@ -9,7 +9,7 @@ These scripts are invoked by the [AWS provider configs](../../providers/aws/).
 | Domain | Scripts | Guide |
 |--------|---------|-------|
 | [`iam/`](iam/) | User create/delete, credential testing | [AWS IAM Guide](iam/docs/aws-iam.md) |
-| [`network/`](network/) | VPC CRUD, subnets, isolation, security, connectivity | [AWS Network Guide](network/docs/aws-network.md) |
+| [`network/`](network/) | VPC CRUD, subnets, isolation, SG CRUD, security, connectivity | [AWS Network Guide](network/docs/aws-network.md) |
 | [`vm/`](vm/) | Instance launch, stop/start, reboot, serial console | [AWS VM Guide](vm/docs/aws-vm.md) |
 | [`bare_metal/`](bare_metal/) | BM launch, topology, serial console, reinstall | [AWS Bare Metal Guide](bare_metal/docs/aws-bm.md) |
 | [`eks/`](eks/) | EKS cluster setup/teardown (Terraform) | [AWS EKS Guide](eks/docs/aws-eks.md) |

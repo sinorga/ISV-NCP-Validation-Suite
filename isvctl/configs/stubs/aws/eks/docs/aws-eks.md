@@ -23,7 +23,7 @@ aws --version
 # Terraform (v1.5+)
 terraform --version
 
-# kubectl
+# kubectl (or set KUBECTL env var to use an alternative CLI, e.g., "oc")
 kubectl version --client
 
 # Helm (v3)
@@ -270,7 +270,7 @@ Results are saved to:
 
 ### Phase 3: Teardown
 
-> **Important**: Teardown runs by default. Set `AWS_SKIP_TEARDOWN=true` to preserve resources.
+> **Important**: Teardown [runs by default](../../../../../../docs/guides/external-validation-guide.md#running-validations), even after test failures. Set `AWS_SKIP_TEARDOWN=true` to preserve resources.
 
 #### Check Current Resources
 
