@@ -412,3 +412,71 @@ class TestVpcIpConfigCheck:
         result = v.execute()
         assert result["passed"] is False
         assert "auto_assign_ip_enabled" in result["error"]
+
+    def test_auto_assign_mode_instance_passes_without_subnet_flag(self) -> None:
+        """GCP-style: external IPs are per-instance, no subnet flag expected."""
+        cfg = _vpc_config(
+            {
+                "subnets": [
+                    {
+                        "subnet_id": "subnet-a",
+                        "cidr": "10.0.1.0/24",
+                        "auto_assign_public_ip": False,
+                        "available_ips": 251,
+                    },
+                ],
+            }
+        )
+        cfg["auto_assign_ip_mode"] = "instance"
+        v = VpcIpConfigCheck(config=cfg)
+        result = v.execute()
+        assert result["passed"] is True
+
+    def test_auto_assign_mode_disabled_passes(self) -> None:
+        """Deployments that don't expose public IPs pass the subtest."""
+        cfg = _vpc_config(
+            {
+                "subnets": [
+                    {
+                        "subnet_id": "subnet-a",
+                        "cidr": "10.0.1.0/24",
+                        "auto_assign_public_ip": False,
+                        "available_ips": 251,
+                    },
+                ],
+            }
+        )
+        cfg["auto_assign_ip_mode"] = "disabled"
+        v = VpcIpConfigCheck(config=cfg)
+        result = v.execute()
+        assert result["passed"] is True
+
+    def test_auto_assign_mode_invalid_fails(self) -> None:
+        """Unknown mode values are a config error."""
+        cfg = _vpc_config()
+        cfg["auto_assign_ip_mode"] = "something-else"
+        v = VpcIpConfigCheck(config=cfg)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "auto_assign_ip_enabled" in result["error"]
+
+    def test_auto_assign_mode_subnet_is_default(self) -> None:
+        """Omitting mode keeps the current AWS-compatible behavior."""
+        cfg = _vpc_config(
+            {
+                "subnets": [
+                    {
+                        "subnet_id": "subnet-a",
+                        "cidr": "10.0.1.0/24",
+                        "auto_assign_public_ip": False,
+                        "available_ips": 251,
+                    },
+                ],
+            }
+        )
+        # No auto_assign_ip_mode set → default "subnet" → must fail since
+        # no subnet has auto_assign_public_ip=True.
+        v = VpcIpConfigCheck(config=cfg)
+        result = v.execute()
+        assert result["passed"] is False
+        assert "auto_assign_ip_enabled" in result["error"]

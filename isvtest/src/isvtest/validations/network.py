@@ -543,11 +543,19 @@ class VpcIpConfigCheck(BaseValidation):
     Checks that:
     1. DHCP options set is configured with DNS servers
     2. Subnet CIDRs are valid, non-overlapping, and within VPC range
-    3. At least one subnet has auto-assign public IP enabled
+    3. Public IP assignment is configured per the provider's model
 
     Config:
         step_output: VPC creation output with dhcp_options, subnets, cidr
         min_ips_per_subnet: Minimum IPs per subnet (default: 16)
+        auto_assign_ip_mode: How the NCP exposes external IPs (default: "subnet"):
+            - "subnet": at least one subnet must have ``auto_assign_public_ip``
+              truthy (AWS model — MapPublicIpOnLaunch)
+            - "instance": external IPs are attached per instance at launch time
+              (GCP model — accessConfig), so subnet-level flags don't apply;
+              the subtest reports PASS with informational status
+            - "disabled": no public IPs expected for this deployment; the
+              subtest reports PASS with informational status
 
     Step output:
         cidr: VPC CIDR block (e.g. "10.0.0.0/16")
@@ -687,7 +695,34 @@ class VpcIpConfigCheck(BaseValidation):
             )
 
     def _check_auto_assign_ip(self, step_output: dict) -> None:
-        """Check that at least one subnet has auto-assign public IP enabled."""
+        """Check public IP assignment per the NCP's configured model."""
+        mode = self.config.get("auto_assign_ip_mode", "subnet")
+        valid_modes = ("subnet", "instance", "disabled")
+        if mode not in valid_modes:
+            self.report_subtest(
+                "auto_assign_ip_enabled",
+                False,
+                f"Invalid auto_assign_ip_mode={mode!r} (expected one of {valid_modes})",
+            )
+            return
+
+        if mode == "instance":
+            self.report_subtest(
+                "auto_assign_ip_enabled",
+                True,
+                "NCP assigns external IPs per-instance (no subnet-level flag)",
+            )
+            return
+
+        if mode == "disabled":
+            self.report_subtest(
+                "auto_assign_ip_enabled",
+                True,
+                "Public IP assignment disabled for this deployment",
+            )
+            return
+
+        # mode == "subnet": AWS-style, at least one subnet must opt in.
         subnets = step_output.get("subnets", [])
 
         if not subnets:
