@@ -73,16 +73,35 @@ def canonical_state(gcp_status: str) -> str:
 
 
 def resolve_project(explicit: str | None = None) -> str:
-    """Resolve the GCP project ID from args or env.
+    """Resolve the GCP project ID from args, env, or application-default creds.
 
-    Checks (in order): ``--project`` arg, ``GOOGLE_CLOUD_PROJECT``, ``GCP_PROJECT``.
+    Resolution order:
+      1. ``--project`` CLI arg
+      2. ``GOOGLE_CLOUD_PROJECT`` env var (standard ADC convention)
+      3. ``GCP_PROJECT`` env var (isvtest convention)
+      4. ``google.auth.default()`` project — reads the gcloud ADC / service
+         account JSON so stubs work in environments where the harness
+         doesn't export the project env var (common when gcloud auth
+         application-default login is the only configured credential source).
     """
     project = explicit or os.environ.get("GOOGLE_CLOUD_PROJECT") or os.environ.get("GCP_PROJECT")
-    if not project:
-        raise RuntimeError(
-            "GCP project not set. Pass --project or export GOOGLE_CLOUD_PROJECT / GCP_PROJECT.",
-        )
-    return project
+    if project:
+        return project
+
+    # Final fallback: ADC. google.auth.default returns (credentials, project_id).
+    try:
+        import google.auth
+
+        _, adc_project = google.auth.default()
+        if adc_project:
+            return adc_project
+    except Exception as e:
+        print(f"  resolve_project: ADC lookup failed: {e}", file=sys.stderr)
+
+    raise RuntimeError(
+        "GCP project not set. Pass --project, export GOOGLE_CLOUD_PROJECT / GCP_PROJECT, "
+        "or run `gcloud config set project <id>` so application-default credentials include it.",
+    )
 
 
 def zone_to_region(zone: str) -> str:
