@@ -1,5 +1,0 @@
-ncp: gcp
-domain: network
-agent: agent-gcp-network-5ac140ce
-branch: agent-gcp-network-5ac140ce
-status: in_progress
