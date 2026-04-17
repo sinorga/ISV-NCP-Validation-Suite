@@ -81,9 +81,19 @@ def test_no_cross_routes(
     network_self_link: str,
     other_cidr: str,
 ) -> dict[str, Any]:
-    """Confirm the VPC has no routes whose dest_range overlaps ``other_cidr``."""
+    """Confirm the VPC has no routes targeting addresses inside ``other_cidr``.
+
+    A cross-VPC route is one whose destination sits *inside* the other VPC's
+    CIDR (indicating traffic would flow into the peer). GCP's default
+    ``0.0.0.0/0 → default-internet-gateway`` route technically overlaps
+    every CIDR as a supernet, but it points at the internet, not the peer
+    network — ``subnet_of`` correctly excludes it.
+    """
+    import ipaddress
+
     result: dict[str, Any] = {"passed": False}
     try:
+        other_net = ipaddress.ip_network(other_cidr, strict=False)
         cross_routes = []
         # RoutesClient.list returns GLOBAL routes — we filter locally to
         # the network under inspection.
@@ -91,11 +101,19 @@ def test_no_cross_routes(
             if route.network != network_self_link:
                 continue
             dest = route.dest_range or ""
-            if dest and cidrs_overlap(dest, other_cidr):
+            if not dest:
+                continue
+            try:
+                dest_net = ipaddress.ip_network(dest, strict=False)
+            except ValueError:
+                continue
+            if dest_net.version != other_net.version:
+                continue
+            if dest_net.subnet_of(other_net):
                 cross_routes.append({"route": route.name, "dest": dest})
         if not cross_routes:
             result["passed"] = True
-            result["message"] = f"No routes overlap {other_cidr}"
+            result["message"] = f"No routes target {other_cidr}"
         else:
             result["error"] = "Cross-network routes found"
             result["routes"] = cross_routes
