@@ -56,7 +56,7 @@ commands:
         command: "python3 ../../stubs/gcp/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-sec"
+          - "isv-shared-vpc-conn"
           - "--region"
           - "{{region}}"
           - "--cidr"
