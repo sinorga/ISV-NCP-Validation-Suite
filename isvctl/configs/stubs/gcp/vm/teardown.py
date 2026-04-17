@@ -132,7 +132,10 @@ def main() -> int:
         # ============================================================
         if args.delete_key_pair:
             key_dir = Path("/tmp")
-            for suffix in (".pem", ".pub"):
+            # ``.pem`` is the private key we write; ``.pem.pub`` is the
+            # sibling ssh-keygen generates. A lingering ``.pub`` may exist
+            # from earlier buggy runs — clean it up too.
+            for suffix in (".pem", ".pem.pub", ".pub"):
                 key_file = key_dir / f"{args.key_name}{suffix}"
                 if key_file.exists():
                     try:

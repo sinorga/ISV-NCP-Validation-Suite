@@ -225,7 +225,11 @@ def create_ssh_key_pair(key_name: str, key_dir: str | Path | None = None) -> tup
     key_dir.mkdir(parents=True, exist_ok=True)
 
     priv = key_dir / f"{key_name}.pem"
-    pub = key_dir / f"{key_name}.pub"
+    # ssh-keygen always derives the public key by appending ".pub" to the
+    # private-key path — so passing ``-f <priv>`` produces ``<priv>.pub``.
+    # We must use the same ``.pem.pub`` suffix here, not ``.pub``, otherwise
+    # the returned path points at a file that doesn't exist on disk.
+    pub = key_dir / f"{key_name}.pem.pub"
 
     if priv.exists() and pub.exists():
         priv.chmod(0o400)
@@ -237,6 +241,11 @@ def create_ssh_key_pair(key_name: str, key_dir: str | Path | None = None) -> tup
         priv.unlink()
     if pub.exists():
         pub.unlink()
+    # Also clean up any stale sibling from earlier (buggy) runs that used
+    # the ".pub" suffix — harmless if it isn't there.
+    stale = key_dir / f"{key_name}.pub"
+    if stale.exists():
+        stale.unlink()
 
     subprocess.run(
         [
