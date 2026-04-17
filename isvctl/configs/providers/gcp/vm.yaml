@@ -1,0 +1,199 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# GCP VM (Compute Engine) Validation Configuration
+#
+# Imports validations from the provider-agnostic VM canonical config.
+# This file only provides GCP-specific commands and settings.
+#
+# Steps:
+#   1. launch_instance - google-cloud-compute: Provision Compute Engine GPU VM (setup)
+#   2. list_instances  - google-cloud-compute: List instances on a VPC network (test)
+#   3. verify_tags     - google-cloud-compute: Verify labels on instance (test)
+#   4. stop_instance   - google-cloud-compute: Stop VM, verify TERMINATED (test)
+#   5. start_instance  - google-cloud-compute: Start stopped VM, verify recovery (test)
+#   6. reboot_instance - google-cloud-compute: Reset VM, validate recovery (test)
+#   7. serial_console  - google-cloud-compute: Retrieve serial port output (test)
+#   8. deploy_nim      - paramiko: Deploy NIM container via SSH (test)
+#   9. teardown_nim    - paramiko: Stop NIM container via SSH (teardown)
+#  10. teardown        - google-cloud-compute: Delete instance + firewall (teardown)
+#
+# Usage:
+#   export GOOGLE_CLOUD_PROJECT=<your-gcp-project>
+#   gcloud auth application-default login
+#   uv run isvctl test run -f isvctl/configs/providers/gcp/vm.yaml
+
+import:
+  - ../../tests/vm.yaml
+
+version: "1.0"
+
+commands:
+  vm:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # GCP-specific: Launch Compute Engine instance
+      - name: launch_instance
+        phase: setup
+        command: "python3 ../../stubs/gcp/vm/launch_instance.py"
+        args:
+          - "--name"
+          - "isv-test-gpu"
+          - "--instance-type"
+          - "{{instance_type}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 900
+
+      # GCP-specific: List instances on a network
+      - name: list_instances
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/list_instances.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.launch_instance.vpc_id}}"
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 180
+
+      # GCP-specific: Verify instance labels
+      - name: verify_tags
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/describe_tags.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 180
+
+      # GCP-specific: Stop Compute Engine instance
+      - name: stop_instance
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/stop_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 600
+
+      # GCP-specific: Start stopped instance
+      - name: start_instance
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/start_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--public-ip"
+          - "{{steps.launch_instance.public_ip}}"
+        timeout: 600
+
+      # GCP-specific: Reset (reboot) instance
+      - name: reboot_instance
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/reboot_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--public-ip"
+          - "{{steps.launch_instance.public_ip}}"
+        timeout: 900
+
+      # GCP-specific: Serial port output (port 1)
+      - name: serial_console
+        phase: test
+        command: "python3 ../../stubs/gcp/vm/serial_console.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 180
+
+      # Shared: Deploy NIM container via SSH (paramiko)
+      # Uses post-reboot IP/key since reset may reassign the external IP
+      - name: deploy_nim
+        phase: test
+        command: "python3 ../../stubs/common/deploy_nim.py"
+        args:
+          - "--host"
+          - "{{steps.reboot_instance.public_ip}}"
+          - "--key-file"
+          - "{{steps.reboot_instance.key_file}}"
+        timeout: 1800
+
+      # Shared: Teardown NIM container via SSH (paramiko)
+      # Uses post-reboot IP/key to match what deploy_nim used
+      - name: teardown_nim
+        phase: teardown
+        command: "python3 ../../stubs/common/teardown_nim.py"
+        args:
+          - "--host"
+          - "{{steps.reboot_instance.public_ip}}"
+          - "--key-file"
+          - "{{steps.reboot_instance.key_file}}"
+        timeout: 180
+
+      # GCP-specific: Teardown
+      - name: teardown
+        phase: teardown
+        command: "python3 ../../stubs/gcp/vm/teardown.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{region}}"
+          - "--delete-key-pair"
+          - "--delete-security-group"
+          - "{{teardown_flag}}"
+        timeout: 600
+
+tests:
+  cluster_name: "gcp-vm-validation"
+  description: "GCP VM (Compute Engine) validation tests"
+
+  settings:
+    # Preferred Taiwan zone per docs/gcp.yaml (t4 availability, operator latency).
+    # GCP doesn't have a region-level compute API — the "region" setting is a zone.
+    region: "asia-east1-a"
+    # n1-standard-4 + nvidia-tesla-t4 is the most widely-available GPU combo.
+    instance_type: "n1-standard-4"
+    teardown_flag: "{{(env.GCP_VM_SKIP_TEARDOWN == 'true') | ternary('--skip-destroy', '')}}"
+
+  # Overrides only — all other validations inherited from ../../tests/vm.yaml
+  validations:
+    # CloudInitCheck defaults to AWS 169.254.169.254 metadata URL.
+    # GCP uses http://metadata.google.internal/ with a required header.
+    cloud_init:
+      step: launch_instance
+      checks:
+        CloudInitCheck:
+          metadata_url: "http://metadata.google.internal/computeMetadata/v1/"
+          metadata_headers:
+            Metadata-Flavor: "Google"
+
+    # GCP labels are lowercase-only, so the instance carries "name"/"created-by"
+    # instead of the AWS "Name"/"CreatedBy" tag convention.
+    tags:
+      step: verify_tags
+      checks:
+        InstanceTagCheck:
+          required_keys: ["name", "created-by"]
