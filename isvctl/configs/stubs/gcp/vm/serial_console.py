@@ -69,10 +69,12 @@ def _fetch_serial_output(
     for attempt in range(retries):
         try:
             response = client.get_serial_port_output(
-                project=project,
-                zone=zone,
-                instance=name,
-                port=1,
+                request=compute_v1.GetSerialPortOutputInstanceRequest(
+                    project=project,
+                    zone=zone,
+                    instance=name,
+                    port=1,
+                )
             )
             contents = response.contents or ""
             if contents:
