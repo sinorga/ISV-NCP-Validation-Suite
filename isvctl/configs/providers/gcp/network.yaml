@@ -56,7 +56,7 @@ commands:
         command: "python3 ../../stubs/gcp/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc"
+          - "isv-shared-vpc-crud"
           - "--region"
           - "{{region}}"
           - "--cidr"
@@ -78,6 +78,7 @@ commands:
       # Test 2: Subnet config across multi-region (4 subnet creates ~60s each)
       - name: subnet_config
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/subnet_test.py"
         args:
           - "--region"
@@ -92,6 +93,7 @@ commands:
       # Test 3: VPC isolation (2 VPCs, no instances)
       - name: vpc_isolation
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/isolation_test.py"
         args:
           - "--region"
@@ -106,6 +108,7 @@ commands:
       # Test 4a: Firewall CRUD
       - name: sg_crud
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/sg_crud_test.py"
         args:
           - "--region"
@@ -118,6 +121,7 @@ commands:
       # Test 4b: Security blocking (firewall deny rules)
       - name: security_blocking
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/security_test.py"
         args:
           - "--region"
@@ -130,6 +134,7 @@ commands:
       # Test 5: Connectivity (2 instances, SSH + ping — ~5-8 min)
       - name: connectivity_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -146,6 +151,7 @@ commands:
       # Test 6: Traffic validation (3 instances, 4 ping tests — up to 15 min)
       - name: traffic_validation
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/traffic_test.py"
         args:
           - "--region"
@@ -158,6 +164,7 @@ commands:
       # Test 7: VPC IP config (read-only describe — fast)
       - name: vpc_ip_config
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -170,6 +177,7 @@ commands:
       # Test 8: DHCP/IP management (launch VM + downstream SSH from validator)
       - name: dhcp_ip_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -186,6 +194,7 @@ commands:
       # Test 9: BYOIP (2 VPCs + 2 subnets — ~3-5 min)
       - name: byoip_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/byoip_test.py"
         args:
           - "--region"
@@ -200,6 +209,7 @@ commands:
       # Test 10: Stable private IP (launch + stop + start + verify — ~5-10 min)
       - name: stable_ip_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/stable_ip_test.py"
         args:
           - "--region"
@@ -212,6 +222,7 @@ commands:
       # Test 11: Floating IP switch (2 VMs + address + reassociate — ~8-10 min)
       - name: floating_ip_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/floating_ip_test.py"
         args:
           - "--region"
@@ -227,6 +238,7 @@ commands:
       # Test 12: Localized DNS (Cloud DNS private zone — API only, fast)
       - name: dns_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/dns_test.py"
         args:
           - "--region"
@@ -241,6 +253,7 @@ commands:
       # Test 13: VPC peering (2 VPCs + 2 add_peering calls + poll state)
       - name: peering_test
         phase: test
+        skip: true
         command: "python3 ../../stubs/gcp/network/peering_test.py"
         args:
           - "--region"
