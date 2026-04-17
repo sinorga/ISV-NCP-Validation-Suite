@@ -559,6 +559,31 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-core"
+version = "2.5.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-api-core" },
+    { name = "google-auth" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/dc/24/6ca08b0a03c7b0c620427503ab00353a4ae806b848b93bcea18b6b76fde6/google_cloud_core-2.5.1.tar.gz", hash = "sha256:3dc94bdec9d05a31d9f355045ed0f369fbc0d8c665076c734f065d729800f811", size = 36078, upload-time = "2026-03-30T22:50:08.057Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/73/d9/5bb050cb32826466aa9b25f79e2ca2879fe66cb76782d4ed798dd7506151/google_cloud_core-2.5.1-py3-none-any.whl", hash = "sha256:ea62cdf502c20e3e14be8a32c05ed02113d7bef454e40ff3fab6fe1ec9f1f4e7", size = 29452, upload-time = "2026-03-30T22:48:31.567Z" },
+]
+
+[[package]]
+name = "google-cloud-dns"
+version = "0.36.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-cloud-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/53/52/418e88ea7bec4778834414db4227ffb22000e75de3541e22b162ab4b787c/google_cloud_dns-0.36.1.tar.gz", hash = "sha256:51fe2b8810df81369dbe2c087ba2944b2a6021905e31048e4dee9c98ff1f1249", size = 23121, upload-time = "2026-03-30T22:50:15.427Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/dc/68/3a3cb8d2394602bfdcc22556a51e241a9ae1797f537b93ff7be8e1344441/google_cloud_dns-0.36.1-py3-none-any.whl", hash = "sha256:83f6855064b325e34c903e77b131c6b191850148e32cec855b986f95bd8df78b", size = 18668, upload-time = "2026-03-30T22:48:00.04Z" },
+]
+
+[[package]]
 name = "googleapis-common-protos"
 version = "1.74.0"
 source = { registry = "https://pypi.org/simple" }
@@ -714,6 +739,7 @@ version = "0.6.5"
 source = { editable = "isvctl" }
 dependencies = [
     { name = "google-cloud-compute" },
+    { name = "google-cloud-dns" },
     { name = "isvreporter" },
     { name = "isvtest" },
     { name = "jinja2" },
@@ -725,6 +751,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "google-cloud-compute", specifier = ">=1.47.0" },
+    { name = "google-cloud-dns", specifier = ">=0.35.0" },
     { name = "isvreporter", editable = "isvreporter" },
     { name = "isvtest", editable = "isvtest" },
     { name = "jinja2", specifier = ">=3.1.6,<4.0.0" },

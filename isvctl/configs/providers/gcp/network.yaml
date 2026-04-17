@@ -1,0 +1,296 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# GCP Network Validation Configuration
+#
+# Imports validations from the provider-agnostic network canonical config
+# and overrides commands with GCP-specific stubs (google-cloud-compute +
+# Cloud DNS REST for the localized_dns step).
+#
+# Steps:
+#   1. create_network       - compute_v1.NetworksClient: shared custom-mode VPC + subnets + SSH firewall (setup)
+#   2. vpc_crud             - Network CRUD (routing_mode flip stands in for tag update) (test)
+#   3. subnet_config        - Multi-region subnet distribution (4 subnets across 2 regions) (test)
+#   4. vpc_isolation        - Two VPCs, verify no peering / no cross-routes (test)
+#   5. sg_crud              - Firewall rule CRUD (GCP SG equivalent) (test)
+#   6. security_blocking    - SG deny cases + explicit DENY firewall (test)
+#   7. connectivity_test    - Launch 2 VMs in shared VPC, ping via SSH (test)
+#   8. traffic_validation   - 3 VMs + firewalls with target tags; ping allowed/blocked/internet (test)
+#   9. vpc_ip_config        - Inspect shared VPC subnets + default DHCP shape (test)
+#  10. dhcp_ip_test         - Launch VM for DhcpIpManagementCheck SSH validation (test)
+#  11. byoip_test           - Custom CIDR subnets (100.64.0.0/16) work alongside standard (test)
+#  12. stable_ip_test       - Internal IP survives stop/start (GCP TERMINATED state) (test)
+#  13. floating_ip_test     - Reassociate static regional address between instances (test)
+#  14. dns_test             - Cloud DNS private managed zone bound to VPC (test)
+#  15. peering_test         - add_peering both sides, verify ACTIVE + subnet route exchange (test)
+#  16. teardown             - Destroy shared VPC + all attached resources (teardown)
+#
+# Usage:
+#   export GOOGLE_CLOUD_PROJECT=<your-gcp-project>
+#   gcloud auth application-default login
+#   uv run isvctl test run -f isvctl/configs/providers/gcp/network.yaml
+#
+# Per docs/gcp.yaml, GCP Compute API operations are async and typically
+# 30-60s each. Timeouts below are sized accordingly; the default 120s is
+# too short for most multi-resource steps.
+
+import:
+  - ../../tests/network.yaml
+
+version: "1.0"
+
+commands:
+  network:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # Setup: Create shared VPC + 2 subnets + SSH firewall
+      - name: create_network
+        phase: setup
+        command: "python3 ../../stubs/gcp/network/create_vpc.py"
+        args:
+          - "--name"
+          - "isv-shared-vpc"
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.0.0.0/16"
+        timeout: 600
+
+      # Test 1: VPC CRUD (API-only, ~60s with patch op)
+      - name: vpc_crud
+        phase: test
+        command: "python3 ../../stubs/gcp/network/vpc_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.99.0.0/16"
+        timeout: 300
+        output_schema: vpc_crud
+
+      # Test 2: Subnet config across multi-region (4 subnet creates ~60s each)
+      - name: subnet_config
+        phase: test
+        command: "python3 ../../stubs/gcp/network/subnet_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.98.0.0/16"
+          - "--subnet-count"
+          - "4"
+        timeout: 600
+        output_schema: subnet_config
+
+      # Test 3: VPC isolation (2 VPCs, no instances)
+      - name: vpc_isolation
+        phase: test
+        command: "python3 ../../stubs/gcp/network/isolation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr-a"
+          - "10.97.0.0/16"
+          - "--cidr-b"
+          - "10.96.0.0/16"
+        timeout: 300
+        output_schema: vpc_isolation
+
+      # Test 4a: Firewall CRUD
+      - name: sg_crud
+        phase: test
+        command: "python3 ../../stubs/gcp/network/sg_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.95.0.0/16"
+        timeout: 300
+        output_schema: sg_crud
+
+      # Test 4b: Security blocking (firewall deny rules)
+      - name: security_blocking
+        phase: test
+        command: "python3 ../../stubs/gcp/network/security_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.94.0.0/16"
+        timeout: 300
+        output_schema: security_blocking
+
+      # Test 5: Connectivity (2 instances, SSH + ping — ~5-8 min)
+      - name: connectivity_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/test_connectivity.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--subnet-ids"
+          - "{{steps.create_network.subnets | map(attribute='subnet_id') | join(',')}}"
+          - "--sg-id"
+          - "{{steps.create_network.security_group_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 900
+        output_schema: connectivity_result
+
+      # Test 6: Traffic validation (3 instances, 4 ping tests — up to 15 min)
+      - name: traffic_validation
+        phase: test
+        command: "python3 ../../stubs/gcp/network/traffic_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.93.0.0/16"
+        timeout: 1200
+        output_schema: traffic_flow
+
+      # Test 7: VPC IP config (read-only describe — fast)
+      - name: vpc_ip_config
+        phase: test
+        command: "python3 ../../stubs/gcp/network/vpc_ip_config_test.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 180
+        output_schema: vpc_ip_config
+
+      # Test 8: DHCP/IP management (launch VM + downstream SSH from validator)
+      - name: dhcp_ip_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/dhcp_ip_test.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--subnet-id"
+          - "{{steps.create_network.subnets[0].subnet_id}}"
+          - "--sg-id"
+          - "{{steps.create_network.security_group_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 600
+        output_schema: dhcp_ip
+
+      # Test 9: BYOIP (2 VPCs + 2 subnets — ~3-5 min)
+      - name: byoip_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/byoip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--custom-cidr"
+          - "100.64.0.0/16"
+          - "--standard-cidr"
+          - "10.90.0.0/16"
+        timeout: 300
+        output_schema: byoip
+
+      # Test 10: Stable private IP (launch + stop + start + verify — ~5-10 min)
+      - name: stable_ip_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/stable_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.91.0.0/16"
+        timeout: 900
+        output_schema: stable_ip
+
+      # Test 11: Floating IP switch (2 VMs + address + reassociate — ~8-10 min)
+      - name: floating_ip_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/floating_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.92.0.0/16"
+          # docs/gcp.yaml: GCP reassociation is ~12s, default 10s is too tight.
+          - "--max-switch-seconds"
+          - "20"
+        timeout: 900
+        output_schema: floating_ip
+
+      # Test 12: Localized DNS (Cloud DNS private zone — API only, fast)
+      - name: dns_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/dns_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.89.0.0/16"
+          - "--domain"
+          - "internal.isv.test"
+        timeout: 300
+        output_schema: localized_dns
+
+      # Test 13: VPC peering (2 VPCs + 2 add_peering calls + poll state)
+      - name: peering_test
+        phase: test
+        command: "python3 ../../stubs/gcp/network/peering_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr-a"
+          - "10.88.0.0/16"
+          - "--cidr-b"
+          - "10.87.0.0/16"
+        timeout: 300
+        output_schema: vpc_peering
+
+      # Teardown: delete the shared VPC and every attached resource
+      - name: teardown
+        phase: teardown
+        command: "python3 ../../stubs/gcp/network/teardown.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 900
+        output_schema: teardown
+
+tests:
+  cluster_name: "gcp-network-validation"
+  description: "GCP VPC and network validation tests"
+
+  settings:
+    # Preferred Taiwan zone per docs/gcp.yaml. Subnetworks are regional in
+    # GCP — stubs strip the trailing ``-a`` to get asia-east1 for the
+    # regional resources.
+    region: "asia-east1-a"
+
+  # ── Validation overrides ────────────────────────────────────────────
+  # Inherits everything from ../../tests/network.yaml and adds the GCP-
+  # specific knobs documented in docs/gcp.yaml.
+  validations:
+    # GCP assigns external IPs per-instance (via accessConfig), not at the
+    # subnet level. The "instance" mode tells VpcIpConfigCheck this is
+    # expected and skips the subnet-flag assertion.
+    network:
+      checks:
+        VpcIpConfigCheck:
+          auto_assign_ip_mode: "instance"
+
+    # docs/gcp.yaml: GCP static IP reassociation takes ~12s, exceeding the
+    # default 10s floating IP switch threshold. Override to 20 so the
+    # allocate/associate/reassociate subtests keep their correctness
+    # value without tripping on GCP's slower reassignment time.
+    sdn:
+      checks:
+        FloatingIpCheck:
+          max_switch_seconds: 20
