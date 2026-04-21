@@ -15,13 +15,13 @@ Manage the test catalog: build, save, and upload to ISV Lab Service.
 
 import json
 import logging
-from pathlib import Path
 from typing import Annotated
 
 import typer
 from isvtest.catalog import build_catalog, get_catalog_version
 
 from isvctl.cli import setup_logging
+from isvctl.cli.common import get_output_dir
 
 logger = logging.getLogger(__name__)
 
@@ -61,8 +61,7 @@ def push(
     catalog_version = get_catalog_version()
     typer.echo(f"  {len(catalog_entries)} tests (version: {catalog_version})")
 
-    output_dir = Path("_output")
-    output_dir.mkdir(parents=True, exist_ok=True)
+    output_dir = get_output_dir()
     catalog_path = output_dir / "test_catalog.json"
     catalog_path.write_text(json.dumps({"isvTestVersion": catalog_version, "entries": catalog_entries}, indent=2))
     typer.echo(f"  Saved to: {catalog_path}")

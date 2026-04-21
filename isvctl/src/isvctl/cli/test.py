@@ -25,6 +25,7 @@ import yaml
 from isvtest.catalog import build_catalog, get_catalog_version
 
 from isvctl.cli import setup_logging
+from isvctl.cli.common import OUTPUT_DIR_NAME, get_output_dir
 from isvctl.config.merger import merge_yaml_files
 from isvctl.config.schema import RunConfig
 from isvctl.orchestrator.loop import Orchestrator, Phase
@@ -124,7 +125,7 @@ def run(
             "--junitxml",
             help="Path to write JUnit XML test report",
         ),
-    ] = Path("junit-validation.xml"),
+    ] = Path(OUTPUT_DIR_NAME) / "junit-validation.xml",
     color: Annotated[
         str | None,
         typer.Option(
@@ -294,10 +295,9 @@ def run(
             )
             upload_results = False
 
-    # Run orchestration with log file capture (like deploy run uses `tee pytest-output.log`)
+    # Run orchestration with log file capture (tee to _output/pytest-output.log)
     orchestrator = Orchestrator(config, working_dir=effective_working_dir)
-    output_dir = effective_working_dir / "_output"
-    output_dir.mkdir(exist_ok=True)
+    output_dir = get_output_dir()
     log_file_path = output_dir / "pytest-output.log"
 
     # Build test catalog early so it runs inside the TeeWriter context
@@ -305,19 +305,19 @@ def run(
     catalog_entries: list[dict] | None = None
     catalog_version: str | None = None
 
-    if upload_results:
-        # Capture output to log file while still displaying (like `tee`)
-        with open(log_file_path, "w") as log_file:
-            original_stdout, original_stderr = sys.stdout, sys.stderr
-            sys.stdout = TeeWriter(terminal=original_stdout, file=log_file)  # type: ignore[assignment]
-            sys.stderr = TeeWriter(terminal=original_stderr, file=log_file)  # type: ignore[assignment]
-            try:
-                result = orchestrator.run(
-                    phases=phases,
-                    extra_pytest_args=extra_pytest_args,
-                    verbose=verbose,
-                    junitxml=str(junitxml),
-                )
+    # Always capture output to log file while still displaying (like `tee`)
+    with open(log_file_path, "w") as log_file:
+        original_stdout, original_stderr = sys.stdout, sys.stderr
+        sys.stdout = TeeWriter(terminal=original_stdout, file=log_file)  # type: ignore[assignment]
+        sys.stderr = TeeWriter(terminal=original_stderr, file=log_file)  # type: ignore[assignment]
+        try:
+            result = orchestrator.run(
+                phases=phases,
+                extra_pytest_args=extra_pytest_args,
+                verbose=verbose,
+                junitxml=str(junitxml),
+            )
+            if upload_results:
                 try:
                     catalog_entries = build_catalog()
                     catalog_version = get_catalog_version()
@@ -329,15 +329,8 @@ def run(
                     typer.echo(f"  Saved test catalog to: {catalog_path}")
                 except Exception as e:
                     logger.warning("Failed to build test catalog: %s", e)
-            finally:
-                sys.stdout, sys.stderr = original_stdout, original_stderr
-    else:
-        result = orchestrator.run(
-            phases=phases,
-            extra_pytest_args=extra_pytest_args,
-            verbose=verbose,
-            junitxml=str(junitxml),
-        )
+        finally:
+            sys.stdout, sys.stderr = original_stdout, original_stderr
 
     # Update test run after tests complete
     if upload_results and test_run_id and lab_id:

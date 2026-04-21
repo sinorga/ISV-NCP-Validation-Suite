@@ -85,6 +85,16 @@ for ns in gpu-operator gpu-operator-resources nvidia-gpu-operator; do
 done
 GPU_OPERATOR_NS="${GPU_OPERATOR_NS:-$DEFAULT_GPU_NS}"
 
+# --- Control-plane namespace (where apiserver/scheduler/controller-manager run) ---
+CONTROL_PLANE_NS=""
+for ns in kube-system openshift-kube-apiserver; do
+    if $KUBECTL get pods -n "$ns" -l component=kube-apiserver --no-headers 2>/dev/null | grep -q .; then
+        CONTROL_PLANE_NS="$ns"
+        break
+    fi
+done
+CONTROL_PLANE_NS="${CONTROL_PLANE_NS:-kube-system}"
+
 # --- Runtime class ---
 RUNTIME_CLASS=""
 if $KUBECTL get runtimeclass nvidia &> /dev/null; then
@@ -105,6 +115,7 @@ cat << EOF
     "gpu_per_node": ${GPU_PER_NODE},
     "total_gpus": ${TOTAL_GPUS},
     "gpu_operator_namespace": "${GPU_OPERATOR_NS}",
+    "control_plane_namespace": "${CONTROL_PLANE_NS}",
     "runtime_class": "${RUNTIME_CLASS}",
     "gpu_resource_name": "nvidia.com/gpu"
   }

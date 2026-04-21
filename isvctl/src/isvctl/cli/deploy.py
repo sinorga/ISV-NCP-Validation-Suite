@@ -26,6 +26,7 @@ from isvreporter.config import get_endpoint, get_ssa_issuer
 from isvreporter.platform import get_platform_from_config
 
 from isvctl.cli import setup_logging
+from isvctl.cli.common import get_output_dir
 from isvctl.orchestrator.loop import Phase
 from isvctl.remote import SCPTransfer, SSHClient, TarArchive
 from isvctl.remote.archive import DEFAULT_EXCLUDES as DEFAULT_ARCHIVE_EXCLUDES
@@ -497,9 +498,7 @@ exit ${{TEST_RESULT:-1}}
         # Step 6: Download results (always download to working_dir)
         typer.echo(typer.style("==>", fg=typer.colors.GREEN) + " Copying test results from remote machine...")
 
-        # Download results to _output/
-        output_dir = working_dir / "_output"
-        output_dir.mkdir(exist_ok=True)
+        output_dir = get_output_dir(working_dir)
 
         local_log = output_dir / "pytest-output.log"
         if scp.download_optional(f"{effective_remote_dir}/pytest-output.log", local_log):
