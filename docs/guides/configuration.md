@@ -50,23 +50,23 @@ Pre-built configs are provided in `isvctl/configs/`:
 
 | Config | Description |
 | ------ | ----------- |
-| `providers/my-isv/*.yaml` | [my-isv scaffold](../../isvctl/configs/stubs/my-isv/README.md) - copy-and-fill-in for your own platform (runs end-to-end under `ISVCTL_DEMO_MODE=1`) |
-| `providers/aws/control-plane.yaml` | AWS API health, access key lifecycle, tenant management |
-| `providers/aws/network.yaml` | AWS VPC network validation (6 test suites) |
-| `providers/aws/vm.yaml` | AWS EC2 GPU instance tests |
-| `providers/aws/iam.yaml` | AWS IAM user lifecycle |
-| `providers/aws/eks.yaml` | AWS EKS with GPU nodes |
-| `tests/k8s.yaml` | Standard Kubernetes cluster |
-| `tests/slurm.yaml` | Slurm HPC cluster |
+| `providers/my-isv/config/*.yaml` | [my-isv scaffold](../../isvctl/configs/providers/my-isv/scripts/README.md) - copy-and-fill-in for your own platform (runs end-to-end under `ISVCTL_DEMO_MODE=1`) |
+| `providers/aws/config/control-plane.yaml` | AWS API health, access key lifecycle, tenant management |
+| `providers/aws/config/network.yaml` | AWS VPC network validation (6 test suites) |
+| `providers/aws/config/vm.yaml` | AWS EC2 GPU instance tests |
+| `providers/aws/config/iam.yaml` | AWS IAM user lifecycle |
+| `providers/aws/config/eks.yaml` | AWS EKS with GPU nodes |
+| `suites/k8s.yaml` | Standard Kubernetes cluster |
+| `suites/slurm.yaml` | Slurm HPC cluster |
 
 ## Basic Usage
 
 ```bash
 # Run a config
-isvctl test run -f isvctl/configs/providers/aws/control-plane.yaml
+isvctl test run -f isvctl/configs/providers/aws/config/control-plane.yaml
 
 # Merge multiple configs (later files override earlier ones)
-isvctl test run -f isvctl/configs/providers/aws/eks.yaml -f my-overrides.yaml
+isvctl test run -f isvctl/configs/providers/aws/config/eks.yaml -f my-overrides.yaml
 
 # Verbose output (shows script output on failure)
 isvctl test run -f config.yaml -v
@@ -269,16 +269,16 @@ The part before the dash must match an existing validation class name (e.g., `K8
 Provider configs can import a canonical test suite and override command definitions while inheriting validations (unless explicitly overridden):
 
 ```yaml
-# isvctl/configs/providers/my-isv/vm.yaml
-import: ../../tests/vm.yaml
+# isvctl/configs/providers/my-isv/config/vm.yaml
+import: ../../../suites/vm.yaml
 
 commands:
   vm:
     steps:
       - name: launch_instance
-        command: "python3 ../../stubs/my-isv/vm/launch_instance.py"
+        command: "python3 ../scripts/vm/launch_instance.py"
       - name: stop_instance
-        command: "python3 ../../stubs/my-isv/vm/stop_instance.py"
+        command: "python3 ../scripts/vm/stop_instance.py"
       # ... list the full set of steps you need
 
 tests:
@@ -626,7 +626,7 @@ tests:
 You can keep exclusions in a separate file and merge it on top of any config:
 
 ```bash
-isvctl test run -f isvctl/configs/tests/k8s.yaml -f my-overrides.yaml
+isvctl test run -f isvctl/configs/suites/k8s.yaml -f my-overrides.yaml
 ```
 
 A template is provided in `isvctl/configs/overrides.yaml`. Note that `exclude` lists from later `-f` files **replace** earlier lists (they are not appended).
