@@ -1,0 +1,101 @@
+# GCP NCP Knowledge File — cross-cutting
+#
+# Human-verified GCP facts that apply across domains. Domain-specific
+# overrides live in context/ncp-knowledge/gcp/<domain>.yaml and deep-merge
+# with the prepare agent's <domain>-gen.yaml at generator time.
+#
+# Read-only — the agent MUST use these values instead of guessing.
+#
+# Last verified: 2026-04-23
+
+ncp: gcp
+
+# ── Compute ────────────────────────────────────────────────────────────
+
+# Pinned single combo. Leaving multiple options causes the agent to write
+# family-dispatch helpers (e.g., `_accelerator_for(family)`) with a fallback
+# default that trips confusingly on CPU-only N2/N2D/C3. If L4 is unavailable
+# in your region, update this value in-place rather than reintroducing a list.
+#
+# Choice rationale (2026-04-23): switched from n1-standard-4+T4 (CC 7.5) to
+# g2-standard-4+L4 (CC 8.9). T4's sub-8.0 compute capability forces NIM onto
+# the V0 engine + flashinfer JIT compile path, which routinely exceeds the
+# 600s health-wait budget in stubs/common/deploy_nim.py as NVIDIA's :latest
+# NIM image rolls forward. L4 reaches the V1 engine path and cold-starts in
+# ~2-3 min. Cost premium ~31% ($0.71/hr vs $0.54/hr) is offset by faster
+# wall-clock and fewer retries per successful run.
+#
+# Human-only fallback notes (not consumed by the agent):
+#   - n1-standard-4 + nvidia-tesla-t4 — cheapest and most available, but
+#     NIM cold-start ≥15 min; not viable with current 600s health timeout.
+#   - a2-highgpu-1g + nvidia-tesla-a100 — only if the test requires A100;
+#     expensive and more stockout-prone than L4.
+compute:
+  gpu_instances:
+    - type: g2-standard-8
+      gpu: nvidia-l4
+      notes: "Integrated GPU — no guest_accelerators config needed (L4 is part of the machine type). 8 vCPU / 32 GB matches AWS g5.xlarge headroom so ContainerRuntimeCheck has room to run side-containers while NIM serves. Compute capability 8.9 → NIM hits V1 engine path, ~2-3 min cold-start."
+
+  # Single pinned GPU image. Leaving multiple options caused the agent
+  # (2026-04-22 run) to pick a stock DL image whose post-stop/start sshd
+  # recovery was >20 min, burning ~3 hours on start_instance retries
+  # before it switched back to this custom image. Do NOT reintroduce a
+  # list — if you need a different image, replace the entry below in-place.
+  gpu_images:
+    - family: ncp-base-cu129-docker
+      project: shoreline-eagle
+      notes: "Custom base image. CUDA on PATH for non-login shells + Docker + nvidia-container-toolkit preinstalled. Post-stop/start sshd recovery ~5 min."
+
+  # Human-only image fallback notes (NOT consumed by the agent). If you
+  # need to replace the pinned image above, pick from these and
+  # understand the tradeoffs:
+  #   - deeplearning-platform-release/common-cu129-ubuntu-2204-nvidia-580
+  #     Stock DL image. CUDA only on login-shell PATH (no Docker).
+  #     Post-stop/start sshd recovery observed >20 min on T4+n1. Requires
+  #     exclude for DriverCheck:cuda_toolkit and ContainerRuntimeCheck.
+  #   - deeplearning-platform-release/common-cu128-ubuntu-2204-nvidia-570
+  #     Older stock DL image. Same caveats.
+  #   - ubuntu-os-cloud/ubuntu-2204-lts
+  #     Plain Ubuntu. No GPU drivers. Only for non-GPU domains.
+
+# ── Regions ────────────────────────────────────────────────────────────
+
+regions:
+  preferred:
+    - asia-east1-a    # Taiwan, nvidia-tesla-t4 available. Close to operator.
+    - us-central1-a
+    - us-central1-b
+
+# ── Cross-domain notes ─────────────────────────────────────────────────
+# Only facts that apply to ALL domains belong here. Domain-specific facts
+# (e.g., "TERMINATED=stopped" is only relevant to compute lifecycle; VPC
+# description immutability only matters for the network domain) go in the
+# per-domain file.
+
+notes:
+  - "GCP API operations (instance create, subnet create, firewall insert) are
+    async and typically take 30-60s each. Steps that create multiple resources
+    sequentially (e.g., 4 subnets, 2 instances) need proportionally longer
+    timeouts. Use these minimums in provider config step timeouts:
+      - API-only steps (CRUD, config checks): 180s
+      - Steps creating 1 instance: 300s
+      - Steps creating 2+ instances or doing SSH: 600s
+      - Steps with instance create + SSH + test + cleanup: 900s
+    The isvctl default (120s) is too short for most GCP operations."
+
+  - "GCP Compute API occasionally drops HTTP connections mid-operation
+    (RemoteDisconnected error). This is transient (~14% of runs). For
+    idempotent operations (describe, list, delete), retry once after a
+    2-second delay before failing."
+
+  - "The test harness does NOT forward `GOOGLE_CLOUD_PROJECT` /
+    `GCLOUD_PROJECT` env vars to spawned stubs. Every stub's
+    `resolve_project()` helper MUST fall back to `google.auth.default()`
+    (ADC) when `--project` is absent and the env var is empty. Without
+    this fallback, stubs fail at startup with 'project ID not found' even
+    when `gcloud auth application-default login` is set up correctly.
+    Unlike AWS (boto3 picks up region/credentials from the default chain
+    without needing a project ID at all), every GCP API call is
+    project-scoped, so every stub is affected. Put the fallback in the
+    provider-common layer (e.g., `stubs/gcp/common/compute.py`) so every
+    stub inherits it."

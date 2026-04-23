@@ -1,0 +1,902 @@
+# Merged per-domain knowledge. Do not edit directly.
+# Sources (in merge precedence order; human override wins):
+#   1. vm.yaml (human override, from factory context/ncp-knowledge/)
+#   2. vm-gen.yaml (prepare-agent output)
+# Regenerate via admin/merge-ncp-knowledge.sh <ncp> <domain>.
+
+meta:
+  target_ncp: gcp
+  domain: vm
+  oracle: aws
+  generated_at: 2026-04-23
+  sdk_version: google-cloud-compute >=1.31
+  override_reason: Provider-config knobs the prepare agent cannot see (validator defaults
+    are AWS-specific).
+steps:
+  launch_instance:
+    classification: adapt
+    oracle_summary: "AWS boto3 flow: create_key_pair (fallback-recreate if local .pem\
+      \ is\nmissing) \u2192 create_security_group with SSH ingress (dedup via\nInvalidGroup.Duplicate\
+      \ handler) \u2192 describe_images to pick the\nnewest matching Deep-Learning\
+      \ GPU AMI (architecture-aware) \u2192 loop\nrun_instances across candidate subnets\
+      \ (prioritised by AZs that\nsupport the instance type) \u2192 wait on instance_running\
+      \ THEN\ninstance_status_ok \u2192 describe_instances to read PublicIpAddress,\n\
+      PrivateIpAddress and State. Success implies the EC2 API has\nobserved the OS\
+      \ booted and status checks pass.\nAlternate path: when AWS_VM_INSTANCE_ID and\
+      \ AWS_VM_KEY_FILE env\nvars are both set, the stub skips creation and describes/starts\n\
+      the pre-existing instance instead (reuse workflow); any stopped\ninstance is\
+      \ started and waited on via instance_status_ok before\nreturning.\n"
+    oracle_invariants:
+    - "Instance IDs are service-assigned (EC2 auto-generates i-xxx) \u2192 name collisions\
+      \ are impossible \u2192 launch_instance's main create path has NO AlreadyExists\
+      \ handler; any create failure is fatal, not a silent reuse."
+    - "ec2.get_waiter('instance_status_ok').wait(...) blocks until AWS reports both\
+      \ system- and instance-status OK \u2192 launch_instance returning success implies\
+      \ the guest reached a boot-observable state. Downstream steps do NOT pre-gate\
+      \ on cloud-init; they rely on this waiter."
+    - 'Key pair is a first-class SDK resource: ec2.create_key_pair returns KeyMaterial
+      (private key) that only exists in-flight; the stub persists it to /tmp and sets
+      key_name in the output; teardown reads the KeyName from the live instance and
+      ec2.delete_key_pair() deletes the SDK-side object.'
+    - Security group is a first-class SDK resource with a name-unique-per-VPC constraint;
+      InvalidGroup.Duplicate is explicitly handled as 'reuse' (but only after filtering
+      by VPC, so scope-binding is preserved).
+    - "SSH ingress is attached to the security group, which is bound to the instance\
+      \ via SecurityGroupIds at run_instances time \u2192 firewall scope is per-instance/per-VPC,\
+      \ not project-global."
+    - "Subnet fallback iterates ONLY on ClientError with Code='Unsupported' (AZ does\
+      \ not support the instance type); all other ClientError re-raise. The fallback\
+      \ stays within one region \u2014 the oracle never falls back across regions\
+      \ because stop/start/reboot/describe are region-scoped."
+    - "AWS ephemeral public IP is bound to the instance lifecycle: it persists for\
+      \ the life of the running instance (including reboots) and is only reassigned\
+      \ on stop\u2192start. The oracle therefore records public_ip once at launch\
+      \ and trusts it across reboot (see reboot_instance's --public-ip arg)."
+    - "Alternate path (env-var-gated reuse): when AWS_VM_INSTANCE_ID+AWS_VM_KEY_FILE\
+      \ are set, the stub fetches the live instance via describe_instances and populates\
+      \ every contract field (instance_id, state, instance_type, public_ip, private_ip,\
+      \ vpc_id, subnet_id, key_name, security_group_id, availability_zone) from the\
+      \ live API response \u2014 NOT from the configured args. It also re-runs instance_status_ok\
+      \ if the instance was stopped, so 'success=true' from this path carries the\
+      \ same readiness guarantee as the main path."
+    - 'The oracle emits platform=''vm'', instance_id, instance_type, public_ip, private_ip,
+      state, vpc_id, subnet_id, availability_zone, key_name, key_file, security_group_id,
+      ami_id, ami_name, architecture (and ''reused'': true on the alternate path).
+      Validator-consumed fields are a subset (see output_schemas.py); the rest are
+      debugging context that downstream stubs read via {{steps.launch_instance.*}}.'
+    target_divergences:
+    - invariant: "Instance IDs are service-assigned \u2192 name collisions impossible"
+      target_reality: "GCE instance names are caller-chosen per zone \u2014 a reused\
+        \ test project will collide with a stale VM on HTTP 409 AlreadyExists. No\
+        \ service-assigned ID exists."
+      required_behavior: "Target stub MUST fail fast on AlreadyExists/Conflict in\
+        \ the main create path. Do NOT catch 409 and continue as success \u2014 that\
+        \ would violate common.md rule on verified read-back. If resource reuse is\
+        \ desired it belongs on a separate env-var-gated path that (a) fetches the\
+        \ existing VM via InstancesClient.get, (b) verifies scope-binding (project,\
+        \ zone, network, subnetwork, labels) AND shape (machine_type, source_image,\
+        \ disk layout), (c) fails if any invariant diverges. Use the instance NAME\
+        \ as instance_id in the emitted JSON (it is GCE's stable lifecycle identifier).\
+        \ Do not fabricate an opaque ID."
+    - invariant: Key pair is a first-class SDK resource
+      target_reality: GCE has no 'key pair' API; SSH access is provisioned by writing
+        'username:ssh-ed25519 ...' into the instance's metadata.items[ssh-keys]. The
+        private key never transits a GCP API.
+      required_behavior: "Target stub generates the keypair locally (e.g. ssh-keygen\
+        \ to /tmp/<key_name>), embeds the PUBLIC key into metadata at insert time,\
+        \ and writes the PRIVATE key path to result['key_file']. Emit result['key_name']\
+        \ as the filename stem (there is no server-side key-pair resource to bind\
+        \ to). Teardown MUST delete the local key file; there is no GCE API call to\
+        \ mirror ec2.delete_key_pair \u2014 omit it rather than invent one."
+    - invariant: Security group is a first-class SDK resource attached to the instance
+      target_reality: "GCE firewall rules are PROJECT-GLOBAL resources attached to\
+        \ a VPC network, NOT to an instance. A rule applies when its network AND target_tags\
+        \ (or source_ranges) match. Firewall names are unique per project, not per\
+        \ VPC \u2014 a stale same-named rule in the same project but different network\
+        \ looks like AlreadyExists but is attached to the wrong network."
+      required_behavior: "Target stub MUST create the firewall rule with a unique\
+        \ name (e.g. '<instance-name>-ssh-fw' scoped by the test run) and bind scope\
+        \ via the network parameter AND a network_tag on both the rule (target_tags)\
+        \ and the instance (tags.items). If AlreadyExists is caught for the firewall,\
+        \ the stub MUST FirewallsClient.get() and verify network == this-run's-network,\
+        \ target_tags == this-run's-tag, and allowed == [tcp:22] \u2014 divergence\
+        \ on any field is fatal, not silent-reuse. Emit result['security_group_id']\
+        \ = <firewall-rule-name> so downstream/teardown wiring via {{steps.launch_instance.security_group_id}}\
+        \ still resolves to a real reference the target's teardown can delete."
+    - invariant: instance_status_ok waiter proves guest is boot-observable before
+        launch returns
+      target_reality: GCE's InstancesClient.insert returns an Operation that completes
+        when the hypervisor has finished provisioning, NOT when the guest is booted.
+        There is no equivalent server-side readiness waiter. The instance's .status
+        transitions to RUNNING well before cloud-init finishes.
+      required_behavior: "Per vm.md: launch_instance MUST run a best-effort SSH wait\
+        \ after the insert Operation completes and the instance reaches status=RUNNING.\
+        \ Cover at least two independent readiness signals (SSH + metadata probe,\
+        \ or SSH + cloud-init status file) and emit success=true iff \u22651 passes\
+        \ within the step timeout. Timeout floor \u2265300s for GPU instances (GCE\
+        \ GPU images boot slowly). Use the SSH flags from vm.md (IdentitiesOnly=yes,\
+        \ PasswordAuthentication=no, UserKnownHostsFile=/dev/null) \u2014 the default\
+        \ wait_for_ssh helper is insufficient. Crucially: every downstream lifecycle\
+        \ step (stop, start, reboot, describe-that-SSHes) MUST pre-gate on `cloud-init\
+        \ status --wait` over SSH before its API call, because launch only guarantees\
+        \ best-effort readiness, not the hard gate AWS provides."
+    - invariant: Region-scoped downstream APIs are indifferent to AZ fallback
+      target_reality: GCE stop/start/reset/get are all zone-scoped (project+zone+instance).
+        If launch_instance falls back from zone-a to zone-b under a stockout, every
+        downstream step hits the statically-configured zone and reports 'not found'.
+      required_behavior: "Preferred per common.md rule: DO NOT implement zone fallback\
+        \ in launch_instance. Fail fast on stockout \u2014 this matches AWS (which\
+        \ also doesn't fall back across regions) and surfaces capacity issues immediately.\
+        \ If fallback is implemented, the stub MUST emit result['zone'] = <effective-zone>\
+        \ AND the provider config MUST wire {{steps.launch_instance.zone}} into every\
+        \ downstream zonal step's args. Silently leaving the provider config pointing\
+        \ at the configured zone while the stub picked a different one is the bug."
+    - invariant: Ephemeral public IP is stable across the instance's running life
+        and survives reboot
+      target_reality: "GCE ephemeral external IPs persist across reset (hard reboot)\
+        \ AND across a running instance's life, but are RELEASED and REASSIGNED on\
+        \ stop\u2192start. On AWS, EC2 ephemeral public IP also changes on stop\u2192\
+        start, so this invariant actually still holds. The divergence is in the mechanism:\
+        \ on GCE the external IP lives on access_configs[0] under network_interfaces[0],\
+        \ not on the instance root."
+      required_behavior: "Target stub reads public_ip from network_interfaces[0].access_configs[0].nat_ip\
+        \ after the Operation completes. Because the insert Operation can return before\
+        \ access_configs are populated, re-fetch the instance via InstancesClient.get\
+        \ if access_configs is empty. Same contract as oracle: record public_ip at\
+        \ launch_instance, re-record at start_instance after stop\u2192start (post-reboot\
+        \ IP is supplied via {{steps.start_instance.public_ip}} in the reboot step,\
+        \ matching the oracle's wiring). Do NOT assume the launch-time IP is still\
+        \ valid after start_instance."
+    - invariant: Alternate reuse path populates contract fields from LIVE API state
+      target_reality: Generator templates often implement reuse by echoing the input
+        args. GCE's describe equivalent is InstancesClient.get, which returns a compute_v1.Instance
+        with all the fields the main path reads from the Operation result.
+      required_behavior: "Preserve the alternate path contract: if env-var-gated reuse\
+        \ is implemented, it MUST call InstancesClient.get(project, zone, instance_name)\
+        \ and populate instance_id, state, machine_type, public_ip, private_ip, network,\
+        \ subnetwork, labels, zone from the live response. If the fetched instance\
+        \ is status=TERMINATED, start it via InstancesClient.start and re-gate on\
+        \ the same best-effort SSH wait the main path uses before declaring success.\
+        \ Emit 'reused': true so the factory can tell the paths apart. DO NOT invent\
+        \ a reuse path if it adds risk \u2014 omitting it is acceptable and will not\
+        \ break the oracle contract."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: insert
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/insert
+    arg_map:
+      InstanceType: instance_resource.machine_type
+      ImageId: instance_resource.disks[0].initialize_params.source_image
+      KeyName: instance_resource.metadata.items[key=ssh-keys]
+      SubnetId: instance_resource.network_interfaces[0].subnetwork
+      SecurityGroupIds: "<N/A \u2014 use tags.items + separate firewall rule, see\
+        \ target_divergences>"
+      TagSpecifications: instance_resource.labels
+      BlockDeviceMappings: instance_resource.disks[0].initialize_params.disk_size_gb
+      MinCount/MaxCount: "<N/A \u2014 insert creates one instance>"
+    returns:
+      instance_id: name
+      instance_type: machine_type.split("/")[-1]
+      public_ip: network_interfaces[0].access_configs[0].nat_i_p
+      private_ip: network_interfaces[0].network_i_p
+      state: <canonical-state(status)>
+      vpc_id: network_interfaces[0].network.split("/")[-1]
+      subnet_id: network_interfaces[0].subnetwork.split("/")[-1]
+      availability_zone: zone.split("/")[-1]
+      key_name: <local-filename-stem>
+      key_file: <local-path-to-private-key>
+      security_group_id: <firewall-rule-name>
+      architecture: <derived from machine_type family>
+    notes: "Insert returns a zone-scoped Operation; use\n`Operation.result(timeout=N)`\
+      \ or the client's\n`wait_for_extended_operation` helper to block. Then fetch\
+      \ the\ninstance via `InstancesClient.get(project, zone, instance)` to\nread\
+      \ network_interfaces[0].access_configs (the Operation result\ndoes not always\
+      \ include access_configs populated).\n\nTimeout floor for GPU instance create:\
+      \ 600s. (Oracle step\ntimeout is 600s; the SSH-readiness gate in vm.md fits\
+      \ inside\nthis.) Operation polling interval: 5-10s.\n\nState-enum canonicalization:\
+      \ introduce a `canonical_state(raw)`\nhelper in provider-common returning the\
+      \ set\n{\"provisioning\", \"staging\", \"running\", \"stopping\",\n \"suspending\"\
+      , \"suspended\", \"stopped\", \"terminated-by-platform\"}.\nMap RUNNING\u2192\
+      \"running\", TERMINATED\u2192\"stopped\" (see stop_instance\ndivergence) and\
+      \ document the emitted set in the helper's\ndocstring per common.md rule.\n\n\
+      Metadata items format for ssh-keys:\n  [{\"key\": \"ssh-keys\", \"value\": \"\
+      <user>:<public-key> <user>\"}]\nAppend \"serial-port-enable\": \"TRUE\" here\
+      \ if the generator\nwants to mirror AWS's interactive serial console signal\n\
+      (see serial_console step).\n\nDO NOT fabricate concrete machine types, image\
+      \ families, image\npublisher project IDs, region, zone, or project ID \u2014\
+      \nthose come from common.yaml. The stub accepts them via --region\n/ --instance-type\
+      \ CLI args as the oracle does. Zone is derived\nfrom region + common.yaml.\n\
+      \nLabels vs Tags: GCE labels are the key/value analog of AWS tags\n(use for\
+      \ {\"name\": \"isv-test-gpu\", \"createdby\": \"isvtest\"}, all\nlowercase,\
+      \ hyphens only, \u226463 chars). GCE \"tags\" (tags.items) are\nsimple strings\
+      \ used for firewall targeting \u2014 emit at least one\n(e.g. the firewall-rule's\
+      \ target_tag) so the SSH-allow firewall\nrule matches this instance.\n"
+  list_instances:
+    classification: direct-map
+    oracle_summary: "ec2.describe_instances(Filters=[{vpc-id: <vpc>}]) \u2192 flatten\n\
+      Reservations \u2192 Instances, skipping terminated. Emits a list with\ninstance_id,\
+      \ instance_type, state, public_ip, private_ip, vpc_id.\nIf --instance-id is\
+      \ provided, sets found_target boolean.\n"
+    oracle_invariants:
+    - VPC-scoping is used directly as a filter on the LIST call (server-side filter).
+      No client-side post-filtering.
+    - Terminated instances are filtered out because AWS keeps terminated instances
+      visible for ~1 hour; GCE deletes them immediately (no equivalent 'zombie' state)
+      so this filter is a no-op on GCE but safe to keep conceptually.
+    - "REQUIRED_FIELDS checked by InstanceListCheck are ('instance_id', 'state', 'vpc_id')\
+      \ \u2014 every emitted instance MUST populate all three or the validator will\
+      \ fail."
+    - found_target and target_instance fields are emitted ONLY when --instance-id
+      is passed (test config passes it); the validator keys on found_target being
+      true.
+    target_divergences:
+    - invariant: REQUIRED_FIELDS includes 'vpc_id'
+      target_reality: GCE has 'network' (URL-encoded, e.g. projects/P/global/networks/default)
+        not 'vpc_id'. The validator's REQUIRED_FIELDS check is a string-match against
+        the key name, not the GCE concept.
+      required_behavior: Target stub MUST emit vpc_id = <network-name-last-segment>
+        on each instance dict so the validator's REQUIRED_FIELDS check passes. Keep
+        the original network URL too (as 'network' or 'network_self_link') for debugging,
+        but vpc_id is the validator-consumed field.
+    - invariant: VPC-scoped list
+      target_reality: InstancesClient.list is zone-scoped, not network-scoped. InstancesClient.aggregated_list
+        returns all zones in a project but no single call returns 'instances in this
+        VPC'.
+      required_behavior: Target stub calls InstancesClient.aggregated_list(project=<project>)
+        (or list per zone if the oracle supplied --vpc-id maps to a known zone via
+        common.yaml), then CLIENT-SIDE filters by network == <network-url-ending-with-vpc-id>.
+        Fail gracefully if project has >1000 instances by setting max_results or documenting
+        a limit. Emit count = len(instances) for the validator's min_count check.
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: aggregated_list
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/aggregatedList
+    arg_map:
+      'Filters=[{vpc-id: X}]': <client-side filter by network>
+      region: "<N/A \u2014 aggregated_list is project-global>"
+    returns:
+      instances[i].instance_id: name
+      instances[i].instance_type: machine_type.split("/")[-1]
+      instances[i].state: <canonical-state(status)>
+      instances[i].public_ip: network_interfaces[0].access_configs[0].nat_i_p
+      instances[i].private_ip: network_interfaces[0].network_i_p
+      instances[i].vpc_id: <network-name>
+      count: len(instances)
+      found_target: <computed>
+      target_instance: <from --instance-id arg>
+    returns_notes: 'Provider config passes {{steps.launch_instance.vpc_id}} as
+
+      --vpc-id; since launch_instance emits vpc_id = network-name,
+
+      list_instances filters by network name match.
+
+      '
+    notes: 'GCE has no ''terminated'' zombie state (terminated instances are
+
+      not returned by list) so the oracle''s skip-terminated filter
+
+      becomes a no-op. Keep the filter for parity and robustness.
+
+      '
+  verify_tags:
+    classification: adapt
+    oracle_summary: "ec2.describe_instances(InstanceIds=[id]) \u2192 flatten Tags\n\
+      [{Key: k, Value: v}, ...] \u2192 dict {k: v} \u2192 emit tags, tag_count.\n\
+      Validator InstanceTagCheck.required_keys defaults to\n[\"Name\", \"CreatedBy\"\
+      ].\n"
+    oracle_invariants:
+    - 'AWS tags are case-preserving: Tags {Name: ''isv-test-gpu'', CreatedBy: ''isvtest''}
+      round-trip with their original casing. InstanceTagCheck.required_keys [''Name'',
+      ''CreatedBy''] depends on this casing exactly.'
+    - AWS tags can be applied to a wide variety of resources; they are arbitrary key/value
+      strings with no character constraints beyond the 256/128 length limits.
+    - The step fetches tags via describe_instances; there is no separate list_tags
+      call for EC2.
+    target_divergences:
+    - invariant: AWS tags preserve mixed-case keys and values
+      target_reality: GCE labels are LOWERCASE ONLY. Keys must match [a-z]([-a-z0-9]*[a-z0-9])?,
+        values must match ([a-z0-9]([-a-z0-9]*[a-z0-9])?)?. Uppercase 'Name' and 'CreatedBy'
+        cannot be stored as GCE labels.
+      required_behavior: "Target stub fetches labels via InstancesClient.get(...).labels\
+        \ (lowercase dict), then EMITS the dict with case remapped to match the validator's\
+        \ required_keys: {'Name': labels['name'], 'CreatedBy': labels['createdby']}.\
+        \ This is NOT validator-gaming under common.md \u2014 it's a well-defined\
+        \ case-normalization of a platform-semantic field (the user intent 'Name=...'\
+        \ is preserved; only the storage casing differs). Include the raw lowercase\
+        \ labels too under a 'labels_raw' key for debugging. The emitted 'Name' MUST\
+        \ come from the actual GCE API response, not be hardcoded. If labels['name']\
+        \ is absent on the fetched VM, emit tags={} and let the validator fail the\
+        \ step \u2014 do not synthesize."
+    - invariant: Tags are stored on the instance resource itself
+      target_reality: GCE also has tags.items (simple string list used for firewall
+        targeting) which is orthogonal to labels. The oracle's concept of 'user-defined
+        tags' maps to labels, not tags.items.
+      required_behavior: "Map AWS Tags \u2192 GCE labels. Do NOT map to tags.items\
+        \ \u2014 that's network-firewall targeting, not identity metadata."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: get
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/get
+    arg_map:
+      InstanceId: instance
+    returns:
+      instance_id: name
+      tags: '<remap: {Name: labels[''name''], CreatedBy: labels[''createdby'']}>'
+      tag_count: len(tags)
+    notes: 'Apply the labels at launch_instance time with the lowercase
+
+      keys ''name'' and ''createdby'' (values: ''isv-test-gpu'',
+
+      ''isvtest''). The case-remap here reads them back with the
+
+      validator''s expected casing.
+
+      '
+  serial_console:
+    classification: adapt
+    oracle_summary: "Two checks in parallel:\n(a) ec2.get_serial_console_access_status()\
+      \ \u2192 reads account-level\n    SerialConsoleAccessEnabled bool (AWS account\
+      \ toggle).\n(b) ec2.get_console_output(InstanceId=..., Latest=True) \u2192 reads\n\
+      \    last console buffer; retries up to 3\xD7 with 10s sleep because\n    Nitro\
+      \ instances take time to populate.\nStep passes if EITHER check succeeds (see\n\
+      SerialConsoleCheck.run \u2014 `console_available OR serial_access`).\n"
+    oracle_invariants:
+    - AWS has an ACCOUNT-LEVEL toggle (get_serial_console_access_status) that gates
+      interactive serial console access; the API returns a real per-account bool,
+      not a platform default. The value is a genuine capability probe, not a literal
+      True.
+    - 'The validator passes on (console_available OR serial_access_enabled), so either
+      signal is sufficient. Both MUST be derived from real API calls, not literals
+      (common.md rule: validator-consumed fields must come from a real signal).'
+    - get_console_output retries because of Nitro delay; without retries the step
+      flakes on freshly-launched instances.
+    - "serial_access_enabled is emitted even when it is False \u2014 the validator\
+      \ logs a warning but does not fail, and downstream tests do not depend on it."
+    target_divergences:
+    - invariant: Account-level serial console toggle exists as a queryable API
+      target_reality: "GCE has NO account-level equivalent. Interactive serial console\
+        \ access is governed by (a) the org policy `constraints/compute.disableSerialPortAccess`\
+        \ (if set, denies everything), (b) the per-instance metadata key `serial-port-enable=TRUE`\
+        \ (enables interactive SSH-to-serial for this VM), and (c) the per-project\
+        \ metadata key of the same name (enables for all VMs in the project). get_serial_port_output\
+        \ (which reads the buffer) works regardless of (b)/(c) \u2014 it is always\
+        \ available for the last 1 MB."
+      required_behavior: "The serial_access_enabled field MUST come from a REAL capability\
+        \ probe, not a literal True (common.md \u2014 even 'platform-semantic mapping'\
+        \ does not permit hardcoding). Probe sequence:\n1. Read the instance's metadata.items\
+        \ via InstancesClient.get and check for key='serial-port-enable' with value\
+        \ in ('TRUE', 'true', '1').\n2. If absent, read project common metadata via\
+        \ ProjectsClient.get(project=...).common_instance_metadata.items and check\
+        \ the same key.\n3. Emit serial_access_enabled = <step 1 OR step 2>.\nIf neither\
+        \ metadata key is set, serial_access_enabled MUST be False \u2014 the field\
+        \ then reflects reality (no interactive console access), and the validator\
+        \ will still pass if console_available is True (which it will be for a booting\
+        \ VM, because get_serial_port_output returns buffer content for any VM that\
+        \ has started).\nThe field flips to False on permission failures (IAM denial\
+        \ on projects.get) \u2014 that is the non-rubber-stamp property common.md\
+        \ demands.\n"
+    - invariant: get_console_output returns empty on Nitro freshly-launched
+      target_reality: GCE's getSerialPortOutput returns up to 1 MB of the running
+        VM's serial buffer; it is populated from STAGING onward. Freshly-launched
+        VMs may still have <4KB at first poll but empty output is rare.
+      required_behavior: Keep the oracle's 3-retry pattern with 10s intervals for
+        robustness. Specify port=1 (the default; some GCE images stream kernel boot
+        to port 1). Emit output_length = len(output) directly from the response.
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: get_serial_port_output
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/getSerialPortOutput
+    arg_map:
+      InstanceId: instance
+      Latest=True: "<N/A \u2014 GCE always returns latest>"
+    returns:
+      instance_id: <from --instance-id arg>
+      console_available: bool(output)
+      serial_access_enabled: <metadata probe, see required_behavior>
+      output_length: len(output)
+      output_snippet: output[-500:]
+      timestamp: <from Operation metadata, if present>
+    notes: "Do NOT hardcode serial_access_enabled=True just because GCE\n'always allows'\
+      \ getSerialPortOutput \u2014 that collapses the\nvalidator into a rubber stamp\
+      \ (common.md violation). Probe the\nactual metadata. A real IAM deny on projects.get\
+      \ must surface\nas serial_access_enabled=False, not a silent True.\n\nThe validator\
+      \ tolerates serial_access_enabled=False when\nconsole_available is True (the\
+      \ realistic common case for a\nfresh GCE VM with no extra metadata), so the\
+      \ step still passes\nhonestly.\n"
+  stop_instance:
+    classification: adapt
+    oracle_summary: "describe_instances to check current state is 'running'\n(idempotent\
+      \ no-op if already 'stopped'; fail if any other state).\nec2.stop_instances\
+      \ \u2192 poll via ec2.get_waiter('instance_stopped')\nwith Delay=15, MaxAttempts=40\
+      \ \u2192 re-describe \u2192 emit final state.\nValidator InstanceStopCheck requires\
+      \ stop_initiated=True AND\nstate=='stopped'.\n"
+    oracle_invariants:
+    - EC2 exposes a 'stopped' state enum; the validator string-matches state=='stopped'.
+    - ec2.stop_instances is near-synchronous for the API call itself; the waiter handles
+      the async transition.
+    - Pre-check guards against starting from a non-running state; 'already stopped'
+      is an idempotent success.
+    - "No SSH gate before calling stop_instances \u2014 AWS's stop is graceful on\
+      \ its own."
+    target_divergences:
+    - invariant: State enum includes lowercase 'stopped'
+      target_reality: "GCE has no 'stopped' \u2014 a fully stopped VM reports status='TERMINATED'\
+        \ (uppercase). GCE also has transient 'STOPPING' and uses 'SUSPENDED' for\
+        \ a different feature."
+      required_behavior: "Use canonical_state() to map TERMINATED\u2192'stopped' before\
+        \ emitting. The internal polling loop targets raw GCE status='TERMINATED'.\
+        \ Downstream (start_instance, teardown) should also use canonical_state to\
+        \ keep the emitted set consistent. This is platform-semantic remap of a pure\
+        \ enum \u2014 permitted under the enum-translation helper rule, NOT the rubber-stamp\
+        \ pattern, because the raw status is a real API return and the mapping is\
+        \ documented and enumerated."
+    - invariant: No SSH pre-gate before lifecycle call
+      target_reality: "GCE's `instances.stop` is graceful (sends ACPI shutdown then\
+        \ kills after timeout) BUT there is no equivalent of AWS's instance_status_ok\
+        \ gate on launch \u2014 so the VM may still be running cloud-init when this\
+        \ step fires, leaving the guest in a dirty state on the next boot."
+      required_behavior: "Per vm.md Pre-lifecycle defensive gate: the first action\
+        \ of stop_instance is `cloud-init status --wait` over SSH (short timeout,\
+        \ best-effort), not the stop API call. If SSH or cloud-init-wait fails with\
+        \ timeout, PROCEED with the stop anyway (the step's job is to stop; logging\
+        \ a warning is enough) \u2014 but if SSH fails because the instance is already\
+        \ unreachable, surface that as an error."
+    - invariant: stop_instances is near-synchronous
+      target_reality: InstancesClient.stop returns an Operation that completes well
+        before status=TERMINATED. GCE VMs (especially GPU) can take 60-180s from STOPPING
+        to TERMINATED.
+      required_behavior: "Wait on the Operation first (for the API-accepted signal\
+        \ \u2192 stop_initiated=True), then poll InstancesClient.get until status=='TERMINATED'\
+        \ with total timeout \u2265600s (oracle step timeout). Use short polling interval\
+        \ (5-10s)."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: stop
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/stop
+    arg_map:
+      InstanceId: instance
+    returns:
+      instance_id: <from --instance-id arg>
+      state: <canonical-state(status), expected 'stopped'>
+      stop_initiated: <Operation accepted / error==None>
+    notes: "Timeout floor for the whole step: 600s (matches oracle). GCE\nhas `discard_local_ssd=True/False`\
+      \ on the stop request \u2014 default\nFalse matches oracle behavior (preserves\
+      \ local SSD if any).\n"
+  start_instance:
+    classification: adapt
+    oracle_summary: "Pre-check state=='stopped' (fail if not). ec2.start_instances.\n\
+      wait on instance_status_ok (same gate as launch \u2014 proves guest\nboot-observable).\
+      \ re-describe \u2192 emit public_ip (may have changed\non AWS too), private_ip,\
+      \ state. Then wait_for_ssh(max 30\xD7 10s =\n5min). Validator InstanceStartCheck\
+      \ requires start_initiated=True\nAND state=='running' AND ssh_ready=True.\n"
+    oracle_invariants:
+    - "instance_status_ok is the hard gate \u2014 start returns success only once\
+      \ the guest is boot-observable. The wait_for_ssh call after it is belt-and-suspenders."
+    - "public_ip is RE-READ from the API (it may have changed on stop\u2192start)\
+      \ and emitted in the result; downstream reboot_instance's --public-ip reads\
+      \ {{steps.start_instance.public_ip}}."
+    - "ssh_ready is validator-consumed (InstanceStartCheck) and is derived from an\
+      \ actual SSH probe \u2014 never a hardcoded True."
+    - The oracle uses the same ssh_utils.wait_for_ssh helper as elsewhere, with ubuntu
+      as ssh_user, reading key_file from the launch step.
+    target_divergences:
+    - invariant: instance_status_ok is a server-side readiness gate
+      target_reality: No server-side readiness gate on GCE. InstancesClient.start
+        returns an Operation that completes when the hypervisor has begun boot, not
+        when the guest is ready.
+      required_behavior: 'After Operation.result(), poll InstancesClient.get until
+        status==''RUNNING'' (timeout 300s). Then: (1) `cloud-init status --wait` over
+        SSH (pre-gate for subsequent lifecycle per vm.md), (2) N=3 consecutive SSH-connect
+        successes spaced 10s apart (common.md rule: stability gate, not first-success).
+        ssh_ready=True iff both gates succeed. Match oracle''s 300s step timeout;
+        if the N-consecutive gate needs longer, raise the step timeout to 600s in
+        target provider config (noted in provider config recommendations).'
+    - invariant: "public_ip may change on stop\u2192start"
+      target_reality: "Same on GCE \u2014 ephemeral external IP is released on stop\
+        \ and a new one is assigned on start."
+      required_behavior: Re-read public_ip from network_interfaces[0].access_configs[0].nat_i_p
+        after Operation completes and after status=='RUNNING'. If access_configs is
+        empty right after the Operation, re-fetch (it's eventually consistent).
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: start
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/start
+    arg_map:
+      InstanceId: instance
+    returns:
+      instance_id: <from --instance-id arg>
+      state: <canonical-state(status), expected 'running'>
+      public_ip: network_interfaces[0].access_configs[0].nat_i_p
+      private_ip: network_interfaces[0].network_i_p
+      key_file: <from --key-file arg, passthrough>
+      ssh_user: "<default, \"<from common.yaml>\" \u2014 GCE default varies by image>"
+      start_initiated: <Operation accepted>
+      ssh_ready: <real SSH probe outcome>
+    notes: "GCE start on a TERMINATED VM may preserve or change the\nexternal IP depending\
+      \ on access_config; the oracle's public_ip\nread-back semantics apply identically.\
+      \ Timeout floor 300s;\nraise to 600s if the N-consecutive SSH gate is tight.\n\
+      \nssh_user: oracle hardcodes 'ubuntu' (Ubuntu AMI assumption). On\nGCE with\
+      \ a Deep Learning image this is typically the account\nname or 'ubuntu' \u2014\
+      \ exact value goes via common.yaml.\n"
+  reboot_instance:
+    classification: adapt
+    oracle_summary: "Pre-check state=='running'. Capture pre_reboot_uptime via SSH\n\
+      (read /proc/uptime). ec2.reboot_instances. time.sleep(60) (the\npapered-over\
+      \ async-ack window). wait on instance_status_ok.\nre-describe \u2192 public_ip.\
+      \ wait_for_ssh. Read post_reboot uptime;\nreboot_confirmed = (post < pre) OR\
+      \ (post < 600s when no pre).\nEmits uptime_seconds + reboot_confirmed.\n"
+    oracle_invariants:
+    - "ec2.reboot_instances is async: the API returns before the guest actually restarts.\
+      \ The oracle papers over this with a 60s sleep \u2014 without it, the post-reboot\
+      \ SSH might still be the PRE-reboot sshd and uptime would reflect pre-reboot\
+      \ boot."
+    - Uptime-decrease is the ground-truth proof of reboot. reboot_confirmed is DERIVED
+      from /proc/uptime values, not hardcoded.
+    - max_uptime=600 is the validator's ceiling; a reboot that leaves uptime_seconds
+      > 600 is treated as 'reboot didn't happen' (see InstanceRebootCheck).
+    - ssh_ready is validator-consumed (InstanceRebootCheck) and must be a real SSH
+      probe.
+    - The provider config wires --public-ip = {{steps.start_instance.public_ip}} so
+      the reboot step uses the current (post-stop-start) IP, not the original launch
+      IP.
+    target_divergences:
+    - invariant: API returns before guest restarts, paper over with time.sleep(60)
+      target_reality: "GCE's instances.reset is HARD reset (no graceful shutdown;\
+        \ ACPI not sent). The Operation also returns as soon as the hypervisor accepts\
+        \ \u2014 pre-reset sshd may answer for 5-30s after. A naive SSH probe risks\
+        \ succeeding against pre-reset sshd, contaminating uptime comparison."
+      required_behavior: "Per common.md rule on async soft-reboot APIs: do NOT use\n\
+        time.sleep(60). Instead:\n1. After instances.reset() Operation completes,\
+        \ poll SSH\n   for connection FAILURE (ConnectTimeout=5s, probe interval\n\
+        \   5s, total timeout 90s). This detects the hypervisor\n   killing pre-reset\
+        \ sshd.\n2. THEN poll SSH for N=3 consecutive successes (common.md\n   stability\
+        \ gate) to reach post-reset steady state.\n3. THEN read /proc/uptime, which\
+        \ now reliably reflects the\n   post-reboot boot.\nThis is strictly more reliable\
+        \ than the oracle's sleep and\nis portable.\n"
+    - invariant: reboot_confirmed derived from /proc/uptime decrease
+      target_reality: "Identical on any Linux guest \u2014 GCE images use the same\
+        \ /proc/uptime."
+      required_behavior: Keep the oracle's uptime-decrease logic unchanged. Emit reboot_confirmed
+        as a real derived bool; never hardcode True.
+    - invariant: Reboot uses instances.reboot (graceful in AWS)
+      target_reality: AWS `reboot_instances` is graceful-then-hard; GCE has no direct
+        equivalent. The closest API is `instances.reset` (hard). A pure soft reboot
+        would require SSHing in and running `sudo reboot`, which is a different contract.
+      required_behavior: "Use InstancesClient.reset(). Document in notes that this\
+        \ is a hard reset (VM does not do graceful shutdown). If the oracle's InstanceRebootCheck\
+        \ were to require graceful semantics, we'd need to add a soft-reboot-via-SSH\
+        \ fallback \u2014 but the validator only cares about uptime-decrease and SSH-recovery,\
+        \ so reset() satisfies the contract."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: reset
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/reset
+    arg_map:
+      InstanceId: instance
+    returns:
+      instance_id: <from --instance-id arg>
+      state: <canonical-state(status), expected 'running'>
+      public_ip: <re-read post-reset>
+      key_file: <from --key-file arg, passthrough>
+      reboot_initiated: <Operation accepted>
+      ssh_ready: <real SSH probe, post-stability-gate>
+      uptime_seconds: <post-reboot /proc/uptime>
+      reboot_confirmed: <post_uptime < pre_uptime>
+      pre_reboot_uptime: <optional, pre-reboot /proc/uptime via SSH>
+    notes: "Oracle step timeout: 600s. The SSH-drop-then-stability gate\nadds ~2-3\
+      \ minutes to the step; fits within 600s comfortably.\nGCE reset is HARD \u2014\
+      \ note this in the stub's docstring so the\nhuman reader doesn't expect graceful\
+      \ shutdown semantics.\n\nDo NOT substitute time.sleep for the SSH-drop gate;\
+      \ doing so\nreproduces the oracle's flakiness and violates the common.md\nasync-reboot\
+      \ rule.\n"
+  deploy_nim:
+    classification: direct-map
+    oracle_summary: 'Uses the SHARED cross-NCP stub stubs/common/deploy_nim.py (NOT
+
+      per-provider). SSHes into the host with --host and --key-file,
+
+      pulls and starts the NIM container, waits for health. The AWS
+
+      provider config wires --host = {{steps.reboot_instance.public_ip}}
+
+      and --key-file = {{steps.reboot_instance.key_file}}.
+
+      '
+    oracle_invariants:
+    - "The stub lives at isvctl/configs/stubs/common/deploy_nim.py and is NCP-agnostic\
+      \ \u2014 it only requires SSH access. No per-NCP implementation needed."
+    - Contract is SSH-over-paramiko; the NCP only needs to supply a reachable host,
+      a working key, and an image+driver that can run `docker run --gpus all`.
+    - "When NGC_API_KEY is unset, stub emits success=true with skipped=true \u2014\
+      \ the validator NimHealthCheck treats skipped as pass."
+    target_divergences: []
+    target_sdk: null
+    arg_map:
+      host: '{{steps.reboot_instance.public_ip}}'
+      key_file: '{{steps.reboot_instance.key_file}}'
+    returns: {}
+    notes: "NO target-side stub to generate. The target provider config\nshould reference\
+      \ ../../stubs/common/deploy_nim.py directly\n(same path as the oracle). The\
+      \ only NCP-specific concern is\nthat the post-reboot instance has outbound internet\
+      \ egress to\nnvcr.io and GPU drivers functional \u2014 both should be true for\n\
+      any properly-launched GCE GPU VM.\n"
+  teardown_nim:
+    classification: direct-map
+    oracle_summary: 'Shared cross-NCP stub stubs/common/teardown_nim.py that SSHes
+      in
+
+      and stops+removes the NIM container.
+
+      '
+    oracle_invariants:
+    - Shared stub; no per-NCP implementation.
+    - "Idempotent \u2014 a no-op if the container is already gone."
+    target_divergences: []
+    target_sdk: null
+    arg_map:
+      host: '{{steps.reboot_instance.public_ip}}'
+      key_file: '{{steps.reboot_instance.key_file}}'
+    returns: {}
+    notes: 'NO target-side stub to generate. Use ../../stubs/common/teardown_nim.py.
+
+      '
+  describe_instance:
+    classification: direct-map
+    oracle_summary: 'Lightweight read-only step: describe_instances by ID, emit
+
+      state, instance_type, public_ip, private_ip, vpc_id, subnet_id,
+
+      availability_zone, launch_time. Anchor step for host-level
+
+      validations (SSH, OS, GPU, host_os, driver, cpu_info,
+
+      container_runtime) running in the test phase on the
+
+      post-reboot state.
+
+      '
+    oracle_invariants:
+    - "No lifecycle side-effects \u2014 pure read. If this step fails the whole test\
+      \ run fails but nothing on the instance changed."
+    - public_ip is reread FROM THE API (not from --public-ip arg) so the validators
+      bound to this step use the current IP, proving lifecycle survival. There is
+      no --public-ip arg because it's re-derived.
+    - "Host validators (ConnectivityCheck, OsCheck, GpuCheck, VcpuPinningCheck, PciBusCheck,\
+      \ HostSoftwareCheck, DriverCheck, CpuInfoCheck, ContainerRuntimeCheck) read\
+      \ host from step_output.public_ip and key_path from step_output.key_file \u2192\
+      \ both MUST be populated."
+    - launch_time is emitted as an ISO-formatted string for downstream consumers;
+      it's not validator-consumed but appears in the schema.
+    target_divergences:
+    - invariant: All contract fields populate from a single describe call
+      target_reality: "GCE's get() returns the same information \u2014 but access_configs\
+        \ may be eventually consistent if the instance just transitioned. For a steady\
+        \ running instance this is a non-issue."
+      required_behavior: "Single InstancesClient.get call. If public_ip is None (access_configs\
+        \ empty), retry once with 5s delay before emitting. Do not fabricate public_ip\
+        \ from a prior step \u2014 the whole point of re-describe is freshness."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: get
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/get
+    arg_map:
+      InstanceId: instance
+    returns:
+      instance_id: name
+      instance_type: machine_type.split("/")[-1]
+      state: <canonical-state(status)>
+      public_ip: network_interfaces[0].access_configs[0].nat_i_p
+      private_ip: network_interfaces[0].network_i_p
+      vpc_id: network.split("/")[-1]
+      subnet_id: subnetwork.split("/")[-1]
+      availability_zone: zone.split("/")[-1]
+      launch_time: creation_timestamp
+      key_file: <from --key-file arg, passthrough>
+      ssh_user: <default, "<from common.yaml>">
+    notes: "Step timeout 120s is adequate \u2014 this is a single API call.\n"
+  teardown:
+    classification: adapt
+    oracle_summary: '--skip-destroy short-circuits with success=True. Otherwise:
+
+      describe_instances to read live SecurityGroups + KeyName;
+
+      terminate_instances; wait on instance_terminated; sleep 5s
+
+      (SG release); conditionally delete each non-default SG
+
+      (skip ''default'' by name); conditionally delete KeyName via
+
+      delete_key_pair + remove local /tmp/<key>.pem. Swallow
+
+      InvalidInstanceID.NotFound as ''already terminated''. Emits
+
+      deleted={instances, security_groups, key_pairs}.
+
+      '
+    oracle_invariants:
+    - "Identifiers are read from the LIVE instance (describe_instances \u2192 SecurityGroups[].GroupId,\
+      \ KeyName) \u2014 NOT from constant literals \u2014 so teardown works even when\
+      \ launch_instance ran with overridden --key-name or custom SG (common.md rule\
+      \ on teardown reading live state)."
+    - --skip-destroy honors VM_SKIP_TEARDOWN=true env gate via the teardown_flag test
+      setting.
+    - Default SG is explicitly filtered out by name ('default') to avoid orphaning
+      the VPC's root SG.
+    - 'InvalidInstanceID.NotFound is idempotent-success: a second teardown run reports
+      ''already terminated'' rather than failing, supporting re-runs.'
+    - "Teardown does NOT depend on any test-phase step output beyond launch_instance.instance_id\
+      \ \u2014 it re-derives everything else from live state."
+    target_divergences:
+    - invariant: SG IDs read from live instance at teardown time
+      target_reality: "GCE has no per-instance SG. Firewall rules are project-global\
+        \ and must be found by name or by matching target_tag to the instance's tags.items.\
+        \ Read the tags.items from the live instance via InstancesClient.get, then\
+        \ FirewallsClient.list with a client-side filter for target_tags containing\
+        \ this instance's tag (or fall back to a naming convention \u2014 but tag-based\
+        \ lookup is more robust)."
+      required_behavior: "Teardown reads identifiers from live state:\n1. InstancesClient.get(project,\
+        \ zone, instance) \u2192 read\n   network_interfaces[0].network, tags.items,\
+        \ labels.\n2. InstancesClient.delete(...) \u2192 Operation.result() wait.\n\
+        3. Retry on transient-state errors (resource in use /\n   operation in progress\
+        \ / dependency violation) with short\n   backoff, 5 attempts \u2014 mirrors\
+        \ oracle's delete_with_retry\n   pattern per common.md rule (same file references:\n\
+        \   aws/network/teardown.py).\n4. After delete: FirewallsClient.list, filter\
+        \ by\n   (network == this-vpc) AND (target_tags intersects\n   instance's\
+        \ former tags.items) \u2192 delete those rules.\n   Skip the 'default-allow-*'\
+        \ auto-created rules by name.\n5. Delete the local private-key file (analog\
+        \ of\n   ec2.delete_key_pair + /tmp/.pem removal) \u2014 there is no\n   server-side\
+        \ key-pair to delete on GCE.\n6. InstancesClient.get returning NotFound \u2192\
+        \ idempotent\n   success (already deleted); InstancesClient.delete can\n \
+        \  raise NotFound if the name races \u2014 also idempotent.\n"
+    - invariant: Default SG is filtered to avoid orphaning the VPC
+      target_reality: "GCE default firewall rules ('default-allow-internal', 'default-allow-ssh',\
+        \ etc.) should NOT be deleted \u2014 they belong to the tenant, not this test\
+        \ run."
+      required_behavior: "Filter out any firewall rule whose name starts with 'default-allow-'\
+        \ OR whose target_tags is empty (meaning it applies to all VMs). Only delete\
+        \ rules created by this test run (identifiable by name prefix or by a createdby-label\
+        \ equivalent on the rule \u2014 GCE firewall rules don't support labels, so\
+        \ use a strict name convention like '<instance-name>-<rand>-ssh-fw')."
+    - invariant: --skip-destroy env gate
+      target_reality: "Same mechanism (CLI flag) \u2014 no API-level divergence."
+      required_behavior: "Preserve --skip-destroy behavior 1:1. Keep the test config's\
+        \ teardown_flag env-var wiring (GCP_VM_SKIP_TEARDOWN env \u2192 --skip-destroy\
+        \ flag)."
+    target_sdk:
+      module: google.cloud.compute_v1
+      class: InstancesClient
+      method: delete
+      docs_url: https://cloud.google.com/compute/docs/reference/rest/v1/instances/delete
+    arg_map:
+      InstanceId: instance
+    returns:
+      resources_destroyed: bool
+      deleted:
+        instances:
+        - <instance-name>
+        security_groups:
+        - <firewall-rule-names>
+        key_pairs:
+        - <local-key-filename>
+      message: <human-readable>
+      warnings:
+      - <optional list of partial-failure messages>
+    notes: "Timeout floor 600s matches oracle. GCE instance delete can take\n60-180s\
+      \ especially for GPU VMs; add 5-10s polling.\n\nTransient-state codes to retry:\
+      \ RESOURCE_IN_USE_BY_ANOTHER_RESOURCE,\nOPERATION_IN_PROGRESS, resourceInUseByAnotherResource.\
+      \ Retry 5\xD7\nwith 10-20s backoff per common.md rule.\n\nGCE has no api-delete\
+      \ for a \"key pair\" \u2014 only the local pem file\nis removed. Omit key_pairs\
+      \ from deleted if the stub did not write\na local file.\n"
+validations:
+  CloudInitCheck:
+    classification: adapt
+    exclude_recommended: false
+    reason: 'CloudInitCheck reads metadata_url and metadata_headers from the
+
+      provider config; GCE''s metadata service URL and Metadata-Flavor
+
+      header differ from AWS and must be overridden.
+
+      '
+    source: https://cloud.google.com/compute/docs/metadata/overview
+    provider_config_overrides: "tests:\n  validations:\n    cloud_init:\n      checks:\n\
+      \        CloudInitCheck:\n          metadata_url: \"http://metadata.google.internal/computeMetadata/v1/\"\
+      \n          metadata_headers:\n            Metadata-Flavor: \"Google\"\n"
+    provider_config:
+      metadata_url: http://metadata.google.internal/computeMetadata/v1/
+      metadata_headers:
+        Metadata-Flavor: Google
+    notes: 'Without this override the check hits the AWS metadata endpoint,
+
+      which is unreachable on GCP. The provider config MUST set both
+
+      metadata_url and metadata_headers; missing the header yields 403.
+
+      '
+  SerialConsoleCheck:
+    classification: adapt
+    exclude_recommended: false
+    reason: 'GCE has no account-level serial-console toggle, but the
+
+      validator accepts (console_available OR serial_access_enabled).
+
+      As long as the stub probes metadata honestly (see
+
+      steps.serial_console.target_divergences) and console_available
+
+      reflects a real get_serial_port_output call, the validator
+
+      passes honestly without exclusion.
+
+      '
+    source: https://cloud.google.com/compute/docs/troubleshooting/troubleshooting-using-serial-console
+  DriverCheck:
+    classification: candidate-for-exclusion
+    exclude_recommended: false
+    reason: "Depends on image. GPU-preinstalled images (the common case for\nthis\
+      \ test) have NVIDIA driver + nvcc. If common.yaml points at\na bare-Ubuntu image\
+      \ with runtime driver install, CUDA may not\nbe on PATH \u2014 exclude via provider\
+      \ config exclude.tests. Do not\npre-exclude at generation time; let operator\
+      \ decide based on\nimage choice.\n"
+    source: https://cloud.google.com/deep-learning-vm/docs/
+  ContainerRuntimeCheck:
+    classification: candidate-for-exclusion
+    exclude_recommended: false
+    reason: 'Depends on image. Deep-learning images have Docker +
+
+      nvidia-container-toolkit preinstalled; bare Ubuntu does not.
+
+      Operator decides via common.yaml image choice.
+
+      '
+  HostSoftwareCheck:
+    classification: candidate-for-exclusion
+    exclude_recommended: false
+    reason: "HostSoftwareCheck looks for libvirt/QEMU/kvm on the host. GCE\nguests\
+      \ are NOT hypervisor hosts \u2014 they are guests of\nGoogle's (custom) hypervisor\
+      \ with no libvirt/QEMU/KVM\ninstalled by default. This check will report those\
+      \ modules\nabsent; whether that is a FAIL depends on whether the\nvalidation's\
+      \ \"expected_*\" params are set. At default (no\nexpected_*), the check REPORTS\
+      \ without failing. So by default\nthis passes \u2014 DO NOT exclude unless a\
+      \ stricter override is\nadded in the test config.\n"
+    source: https://cloud.google.com/compute/docs/cpu-platforms
+  VcpuPinningCheck:
+    classification: candidate-for-exclusion
+    exclude_recommended: false
+    reason: "GCE exposes vCPU count, NUMA topology, and PCI GPU NUMA node\nvia /proc\
+      \ and /sys on the guest \u2014 same as AWS. Should work\nwithout modification\
+      \ on any modern GCE GPU image.\n"
+  PciBusCheck:
+    classification: candidate-for-exclusion
+    exclude_recommended: false
+    reason: 'GCE passes through NVIDIA GPUs via PCIe; lspci and
+
+      /sys/class/pci_bus work identically. Any image with a modern
+
+      kernel will pass the PCI GPU enumeration subtest.
+
+      '
+domain_notes: "Scope mismatch: AWS uses region for compute APIs; GCE uses zone.\n\
+  Provider config should pass --zone to all zonal steps (start, stop,\nreset, get,\
+  \ delete) and derive zone from region + common.yaml. If a\nzone fallback is ever\
+  \ introduced, see launch_instance.target_divergences\nfor the mandatory emit-and-wire\
+  \ pattern.\n\nValidator contract: the emitted state enum set across all steps must\n\
+  match what InstanceStateCheck string-compares against. Oracle's\nset is lowercase\
+  \ ('running', 'stopped'). Target MUST use the same\nlowercase set via canonical_state().\
+  \ Do NOT let the raw GCE upper-case\nenum leak into the emitted JSON.\n\nPre-lifecycle\
+  \ gate: EVERY step that issues a GCE API call against\na running instance (stop,\
+  \ reset, describe-followed-by-SSH, and\nany future step) MUST first SSH-probe `cloud-init\
+  \ status --wait`\nper vm.md. This is the NCP's answer to AWS's instance_status_ok\n\
+  gate on launch, which the oracle gets for free but GCE does not\nprovide server-side.\n\
+  \nOpen questions (flag for operator review):\n- Default ssh_user for the chosen\
+  \ GPU image is tenant-scoped\n  (depends on image family). Must come from common.yaml.\n\
+  - Whether to keep the alternate env-var-gated reuse path in\n  launch_instance,\
+  \ or drop it \u2014 common.md permits either, and\n  omitting reduces surface area.\n"
