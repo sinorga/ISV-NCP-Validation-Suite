@@ -257,10 +257,10 @@ By making a contribution to this project, I certify that:
 All packages share a single version. To bump:
 
 ```bash
-python scripts/bump-version.py patch          # 0.4.2 -> 0.4.3
-python scripts/bump-version.py minor          # 0.4.2 -> 0.5.0
-python scripts/bump-version.py major          # 0.4.2 -> 1.0.0
-python scripts/bump-version.py 1.2.3          # Explicit version
+make bump-patch             # 0.4.2 -> 0.4.3
+make bump-minor             # 0.4.2 -> 0.5.0
+make bump-major             # 0.4.2 -> 1.0.0
+make bump VERSION=1.2.3     # Explicit version
 ```
 
 The script updates all `pyproject.toml` files and runs `uv lock`.
