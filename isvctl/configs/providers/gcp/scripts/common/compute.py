@@ -364,6 +364,9 @@ def generate_ssh_keypair(
     """
     name = _safe_name(key_basename)
     key_path = Path(key_dir) / f"{name}.pem"
+    # ssh-keygen appends ``.pub`` to the full ``-f`` argument, so the public
+    # half lives at ``<key_path>.pub`` — NOT ``key_path.with_suffix(".pub")``
+    # (which would replace ``.pem`` and produce a sibling that never exists).
     pub_path = public_key_path(key_path)
 
     if key_path.exists() and pub_path.exists() and key_path.stat().st_size > 0:

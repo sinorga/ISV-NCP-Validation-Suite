@@ -51,7 +51,6 @@ from common.compute import (
     is_already_exists,
     is_sentinel,
     is_zone_unavailable,
-    public_key_path,
     read_ssh_public_key,
     resolve_image,
     resolve_project,
@@ -628,14 +627,16 @@ def main() -> int:
                 op.result(timeout=120)
             except Exception as cleanup_exc:
                 print(f"Warning: firewall cleanup failed: {cleanup_exc}", file=sys.stderr)
-        if key_created and key_file:
-            for path in (Path(key_file), public_key_path(key_file)):
-                try:
-                    if path.exists():
-                        path.chmod(0o600)
-                        path.unlink()
-                except OSError:
-                    pass
+        # Local SSH keypair cleanup is INTENTIONALLY deferred to the
+        # teardown step — setup-phase pytest validations (CloudInitCheck,
+        # InstanceTagCheck via SSH probes, etc.) run AFTER this script
+        # returns and BEFORE the orchestrator dispatches teardown, and
+        # those validators need to load the same ``key_file`` we emit on
+        # stdout. Wiping the keys here strands the validators with a
+        # FileNotFoundError on the PEM path they were just told to use.
+        # The teardown step receives ``--key-created`` and
+        # ``--key-file`` from the JSON we print below and is the single
+        # owner of local PEM cleanup.
         print(json.dumps(result, indent=2, default=str))
         return 1
 
