@@ -316,8 +316,14 @@ def main() -> int:
 
     suffix_name = unique_suffix(args.name)
     suffix_key = unique_suffix(args.key_name)
-    firewall_base = unique_suffix("isv-test-ssh")
-    target_tag = unique_suffix("isv-test-vm")
+    # Derive the SSH firewall and target tag from the (step-discriminated)
+    # ``args.name`` so parallel worker worktrees don't race on a shared
+    # project-global firewall: sibling worker teardown deleting an
+    # adopted-via-reuse rule would yank SSH out from under my VM
+    # mid-test. ``args.name`` is already short and validated by the
+    # caller; the helper enforces the 63-char GCE name regex.
+    firewall_base = unique_suffix(f"fw-{args.name}")
+    target_tag = unique_suffix(f"tag-{args.name}")
 
     result: dict[str, Any] = {
         "success": False,
@@ -357,9 +363,17 @@ def main() -> int:
     # insert acks. The caller's finally: block reads it on wait-failure so
     # ownership of the accepted firewall never gets lost.
     firewall_tracker: dict[str, Any] = {}
+    # Bound the walk so capacity-exhausted environments fail within the
+    # step's 900s budget. PREFERRED_ZONES has 24 entries; observed per-
+    # zone time on a sync 503 stockout is ~15s, so 12 entries (~180s
+    # walk + ~30s setup) keeps the worst case well under 900s while
+    # covering all US regions. A full zone pin (3 dash tokens) is
+    # honored verbatim and not sliced.
     candidate_zones = select_zones(args.region, PREFERRED_ZONES)
     if not candidate_zones:
         return _emit_failed(result, "no candidate zones resolved from --region")
+    if len(candidate_zones) > 12 and len(args.region.split("-")) < 3:
+        candidate_zones = candidate_zones[:12]
 
     try:
         # Local PEM generation (verified-reuse aware; tuple-unpack is the

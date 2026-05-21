@@ -576,7 +576,11 @@ def delete_failed_zonal_instance(client: Any, project: str, zone: str, name: str
         return False
 
     try:
-        wait_for_zonal_op(client, project, zone, op, timeout=180)
+        # Tight wait: this is a phantom-cleanup path that must not
+        # consume the launch step's per-zone walk budget. A real phantom
+        # delete completes in seconds; if it doesn't, surface the zone
+        # in ``leaked_zones`` and let teardown reclaim it.
+        wait_for_zonal_op(client, project, zone, op, timeout=60)
         return True
     except Exception as exc:
         if "404" in str(exc) or "notFound" in str(exc).lower():
