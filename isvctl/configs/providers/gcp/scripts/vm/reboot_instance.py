@@ -139,8 +139,11 @@ def main() -> int:
 
         # Require the pre-reset sshd to actually drop before probing
         # post-reset state — otherwise the probe may hit the lingering
-        # pre-reset sshd and falsely affirm.
-        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file):
+        # pre-reset sshd and falsely affirm. instances.reset acks before
+        # the VM actually power-cycles; the 12-attempt default (~60s)
+        # is too tight for some L4 zones where reset propagation is
+        # slow. Allow up to ~180s of probing for the drop.
+        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file, max_attempts=36, interval=5):
             result["error"] = "pre-reset sshd did not drop within wait window; cannot affirm reboot"
             print(json.dumps(result, indent=2, default=str))
             return 1
@@ -159,7 +162,11 @@ def main() -> int:
         nic = (inst.network_interfaces or [None])[0]
         result["private_ip"] = getattr(nic, "network_i_p", "") if nic else ""
 
-        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=36, interval=10):
+        # Match the post-stop/start SSH wait budget (60 attempts ~660s)
+        # to cover the documented 5-7min sshd recovery window. 36 attempts
+        # (~400s) trips at the edge of the recovery window on capacity-
+        # heavy days.
+        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=60, interval=10):
             result["error"] = "SSH not ready after reset"
             print(json.dumps(result, indent=2, default=str))
             return 1

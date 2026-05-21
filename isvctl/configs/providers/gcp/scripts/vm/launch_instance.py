@@ -49,7 +49,6 @@ from common.compute import (
     generate_ssh_keypair,
     is_sentinel,
     is_zone_unavailable,
-    public_key_path,
     read_ssh_public_key,
     resolve_image,
     resolve_project,
@@ -436,6 +435,19 @@ def main() -> int:
                 break
             except Exception as exc:
                 last_error = exc
+                msg = str(exc)
+                # 409 "already exists" means a prior failed run leaked an
+                # instance with the same RUN_ID-suffixed name in this zone
+                # (the teardown step couldn't reach GCP). Reclaim it and
+                # continue the walk — the zone itself may be fine, but burn
+                # it from this attempt to avoid an immediate insert-after-
+                # delete race.
+                if "already exists" in msg or " 409 " in f" {msg} ":
+                    print(f"  zone {zone} has a leaked record from a prior run; reclaiming", file=sys.stderr)
+                    delete_failed_zonal_instance(instances_client, project, zone, suffix_name)
+                    leaked.append(zone)
+                    result["leaked_zones"] = list(leaked)
+                    continue
                 if is_zone_unavailable(exc):
                     print(f"  zone {zone} unavailable: {exc}", file=sys.stderr)
                     # Shapes 2 / 4 may leave a partial record — reclaim it
@@ -532,14 +544,15 @@ def main() -> int:
                 op.result(timeout=120)
             except Exception as cleanup_exc:
                 print(f"Warning: firewall cleanup failed: {cleanup_exc}", file=sys.stderr)
-        if key_created and key_file:
-            for path in (Path(key_file), public_key_path(key_file)):
-                try:
-                    if path.exists():
-                        path.chmod(0o600)
-                        path.unlink()
-                except OSError:
-                    pass
+        # Local SSH keypair cleanup is INTENTIONALLY deferred to the
+        # teardown step — setup-phase pytest validations (CloudInitCheck
+        # via SSH probes, etc.) run AFTER this script returns and BEFORE
+        # the orchestrator dispatches teardown, and those validators load
+        # ``key_file`` from the emitted JSON. Wiping the keys here would
+        # strand the validators with a FileNotFoundError on the PEM path
+        # the script just printed. The teardown step receives
+        # ``--key-created`` and ``--key-file`` from the JSON below and is
+        # the single owner of local PEM cleanup.
         print(json.dumps(result, indent=2, default=str))
         return 1
 
