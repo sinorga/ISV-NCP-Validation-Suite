@@ -139,8 +139,12 @@ def main() -> int:
 
         # Require the pre-reset sshd to actually drop before probing
         # post-reset state — otherwise the probe may hit the lingering
-        # pre-reset sshd and falsely affirm.
-        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file):
+        # pre-reset sshd and falsely affirm. The default 60s budget is too
+        # tight for GPU-bearing g2-standard-* instances; observed reset
+        # propagation on the operator's image takes longer than that, so
+        # extend to ~3 minutes (24 attempts x 5s interval + per-probe
+        # connect overhead) before declaring no-drop.
+        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file, max_attempts=24, interval=5):
             result["error"] = "pre-reset sshd did not drop within wait window; cannot affirm reboot"
             print(json.dumps(result, indent=2, default=str))
             return 1

@@ -193,7 +193,12 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
+    # Canonical capacity tokens can arrive on RuntimeError (polling-fallback
+    # shape 4) OR on the underlying gax_exceptions class directly when the
+    # sync insert returns HTTP 503 ServiceUnavailable carrying
+    # ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS. Match by message regardless
+    # of exception type — the tokens themselves only appear in capacity errors.
+    if (
         "ZONE_RESOURCE" in msg
         or "STOCKOUT" in msg.upper()
         or "does not have enough resources" in msg
@@ -351,6 +356,12 @@ def generate_ssh_keypair(
         capture_output=True,
         timeout=30,
     )
+    # ssh-keygen appends ".pub" to its -f argument, producing <name>.pem.pub.
+    # The rest of the contract uses .with_suffix(".pub") which gives <name>.pub
+    # (the .pem replaced, not appended), so move the file to that location.
+    generated_pub = Path(f"{key_path}.pub")
+    if generated_pub.exists():
+        generated_pub.rename(pub_path)
     key_path.chmod(0o400)
     print(f"Generated SSH keypair at {key_path}", file=sys.stderr)
     return str(key_path), True
