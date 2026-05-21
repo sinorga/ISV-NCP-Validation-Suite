@@ -193,7 +193,15 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
+    # GCE delivers ZONE_RESOURCE_POOL_EXHAUSTED in three observable
+    # wrappings: as ``RuntimeError`` from ``wait_for_zonal_op`` (the op
+    # finished with an error), as ``ServiceUnavailable`` (HTTP 503) from
+    # ``instances.insert`` synchronous error, or as ``ResourceExhausted``
+    # (HTTP 429) caught above. The capacity tokens are unambiguous so
+    # match the message regardless of wrapper here — without this, the
+    # walker treats the 503 wrapper as a non-capacity failure and bails
+    # out on the very first zone.
+    if (
         "ZONE_RESOURCE" in msg
         or "STOCKOUT" in msg.upper()
         or "does not have enough resources" in msg
@@ -327,7 +335,11 @@ def generate_ssh_keypair(
     """
     name = _safe_name(key_basename)
     key_path = Path(key_dir) / f"{name}.pem"
-    pub_path = key_path.with_suffix(".pub")
+    # ssh-keygen appends ``.pub`` to the ``-f`` filename verbatim
+    # (``foo.pem`` → ``foo.pem.pub``); ``Path.with_suffix`` would
+    # REPLACE ``.pem`` and miss the real file, so build the sibling
+    # path by concatenation here and everywhere else that reads it.
+    pub_path = Path(str(key_path) + ".pub")
 
     if key_path.exists() and pub_path.exists() and key_path.stat().st_size > 0:
         try:
@@ -358,7 +370,9 @@ def generate_ssh_keypair(
 
 def read_ssh_public_key(key_file: str) -> str:
     """Read the ``.pub`` sibling of a ``.pem`` produced by :func:`generate_ssh_keypair`."""
-    return Path(key_file).with_suffix(".pub").read_text().strip()
+    # See ``generate_ssh_keypair``: ssh-keygen produces ``<key_file>.pub``,
+    # not ``<key_file stem>.pub`` — concatenate rather than replacing suffix.
+    return Path(str(key_file) + ".pub").read_text().strip()
 
 
 def _has_isv_description(description: str | None) -> bool:
@@ -529,7 +543,11 @@ def delete_failed_zonal_instance(client: Any, project: str, zone: str, name: str
         return False
 
     try:
-        wait_for_zonal_op(client, project, zone, op, timeout=180)
+        # Tight wait: this is a phantom-cleanup path that must not
+        # consume the launch step's per-zone walk budget. A real phantom
+        # delete completes in seconds; if it doesn't, surface the zone
+        # in ``leaked_zones`` and let teardown reclaim it.
+        wait_for_zonal_op(client, project, zone, op, timeout=60)
         return True
     except Exception as exc:
         if "404" in str(exc) or "notFound" in str(exc).lower():

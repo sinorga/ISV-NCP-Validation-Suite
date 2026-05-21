@@ -755,7 +755,9 @@ def _run_self_provision_path(
                 cleanup_errors.append(f"scoping firewall cleanup: {exc}")
 
         if key_created and key_path:
-            for path in (Path(key_path), Path(key_path).with_suffix(".pub")):
+            # ssh-keygen produces ``<key_path>.pub`` (concatenation, not
+            # suffix swap) — match the create path or the .pub leaks.
+            for path in (Path(key_path), Path(str(key_path) + ".pub")):
                 try:
                     if path.exists():
                         path.chmod(0o600)

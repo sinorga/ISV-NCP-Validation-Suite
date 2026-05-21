@@ -165,7 +165,9 @@ def main() -> int:
     # PEM may exist after an aborted run even if the cloud resource is
     # gone.
     if args.delete_key_pair and key_created and not is_sentinel(args.key_file):
-        for path in (Path(args.key_file), Path(args.key_file).with_suffix(".pub")):
+        # ssh-keygen produces ``<key_file>.pub`` (concatenation, not
+        # suffix swap) — match the create path or the .pub leaks.
+        for path in (Path(args.key_file), Path(str(args.key_file) + ".pub")):
             try:
                 if path.exists():
                     path.chmod(0o600)
