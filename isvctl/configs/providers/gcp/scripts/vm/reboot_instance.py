@@ -139,12 +139,14 @@ def main() -> int:
 
         # Require the pre-reset sshd to actually drop before probing
         # post-reset state — otherwise the probe may hit the lingering
-        # pre-reset sshd and falsely affirm. The default 60s budget is too
-        # tight for GPU-bearing g2-standard-* instances; observed reset
-        # propagation on the operator's image takes longer than that, so
-        # extend to ~3 minutes (24 attempts x 5s interval + per-probe
-        # connect overhead) before declaring no-drop.
-        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file, max_attempts=24, interval=5):
+        # pre-reset sshd and falsely affirm. instances.reset acks before
+        # the VM actually power-cycles; the 12-attempt default (~60s) and
+        # even the previously-merged 24-attempt (~120s) budget are too
+        # tight for GPU-bearing g2-standard-* + L4 zones where reset
+        # propagation is slow. Allow up to ~180s (36 attempts x 5s) of
+        # probing for the drop — this is the value the reboot_instance
+        # live gate ran clean against on the operator's image.
+        if not wait_for_ssh_drop(args.public_ip, args.ssh_user, args.key_file, max_attempts=36, interval=5):
             result["error"] = "pre-reset sshd did not drop within wait window; cannot affirm reboot"
             print(json.dumps(result, indent=2, default=str))
             return 1
@@ -163,7 +165,11 @@ def main() -> int:
         nic = (inst.network_interfaces or [None])[0]
         result["private_ip"] = getattr(nic, "network_i_p", "") if nic else ""
 
-        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=36, interval=10):
+        # Match the post-stop/start SSH wait budget (60 attempts ~660s)
+        # to cover the documented 5-7min sshd recovery window. 36 attempts
+        # (~400s) trips at the edge of the recovery window on capacity-
+        # heavy days.
+        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=60, interval=10):
             result["error"] = "SSH not ready after reset"
             print(json.dumps(result, indent=2, default=str))
             return 1

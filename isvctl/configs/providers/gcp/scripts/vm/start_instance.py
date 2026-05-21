@@ -134,7 +134,13 @@ def main() -> int:
         nic = (inst.network_interfaces or [None])[0]
         result["private_ip"] = getattr(nic, "network_i_p", "") if nic else ""
 
-        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=30, interval=10):
+        # Compute Engine post-stop/start sshd recovery on g2-standard-* +
+        # L4 GPUs is documented at ~5-7 minutes; 30 attempts at ~11s/cycle
+        # (5s connect timeout + 10s sleep when sshd is not yet bound) is
+        # ~330s which trips right at the edge of the recovery window.
+        # 60 attempts (~660s) leaves comfortable margin without exceeding
+        # the 1200s step budget.
+        if not wait_for_ssh(public_ip, args.ssh_user, args.key_file, max_attempts=60, interval=10):
             result["error"] = "SSH not ready after start"
             print(json.dumps(result, indent=2, default=str))
             return 1
