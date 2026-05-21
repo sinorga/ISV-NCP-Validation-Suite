@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu-reboot-instance"
+          - "isv-test-gpu"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
@@ -67,20 +67,11 @@ commands:
           - "--image-project"
           - "{{image_project}}"
           - "--key-name"
-          # Step-discriminated so sibling factory workers don't race on
-          # the shared `/tmp/isv-test-key-<run>.pem` path (verified-reuse +
-          # cross-worker teardown can wipe a sibling's in-flight key file).
-          - "isv-test-key-reboot-instance"
-        # GCP launch budget covers: image resolve + firewall create + a
-        # multi-zone STOCKOUT walk (3 in-region L4 zones can each take
-        # ~30s to reject) + insert wait + public-IP poll (up to 180s) +
-        # SSH/cloud-init/stability gates. 900s left zero margin on
-        # STOCKOUT-heavy days.
-        timeout: 1800
+          - "isv-test-key"
+        timeout: 900
 
       - name: list_instances
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/list_instances.py"
         args:
           - "--vpc-id"
@@ -93,7 +84,6 @@ commands:
 
       - name: verify_tags
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/describe_tags.py"
         args:
           - "--instance-id"
@@ -104,7 +94,6 @@ commands:
 
       - name: serial_console
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/serial_console.py"
         args:
           - "--instance-id"
@@ -115,7 +104,6 @@ commands:
 
       - name: console_rbac
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/console_rbac.py"
         args:
           - "--instance-id"
@@ -129,7 +117,6 @@ commands:
 
       - name: virtual_device_hardening
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/virtual_device_hardening.py"
         args:
           - "--instance-id"
@@ -173,10 +160,7 @@ commands:
           - "{{steps.launch_instance.zone}}"
           - "--key-file"
           - "{{steps.launch_instance.key_file}}"
-        # SSH wait was bumped to 60 attempts (~660s) to cover the
-        # documented 5-7min post-stop sshd recovery; add headroom over
-        # that wait plus cloud-init (300s) + stability (30s).
-        timeout: 1200
+        timeout: 600
 
       - name: reboot_instance
         phase: test
@@ -190,13 +174,10 @@ commands:
           - "{{steps.launch_instance.key_file}}"
           - "--public-ip"
           - "{{steps.start_instance.public_ip}}"
-        # Same SSH-wait headroom as start_instance: 60 attempts (~660s)
-        # for post-reset sshd recovery + cloud-init + stability probes.
-        timeout: 1500
+        timeout: 900
 
       - name: describe_instance
         phase: test
-        skip: true
         command: "python3 ../scripts/vm/describe_instance.py"
         args:
           - "--instance-id"
@@ -211,7 +192,6 @@ commands:
 
       - name: deploy_nim
         phase: test
-        skip: true
         command: "python3 ../../shared/deploy_nim.py"
         args:
           - "--host"
@@ -224,7 +204,6 @@ commands:
 
       - name: teardown_nim
         phase: teardown
-        skip: true
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"
