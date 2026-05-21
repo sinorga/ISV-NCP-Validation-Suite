@@ -191,13 +191,16 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     if gax_exceptions is not None and isinstance(err, gax_exceptions.ResourceExhausted):
         return True
     msg = str(err) if err else ""
+    upper = msg.upper()
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
-        "ZONE_RESOURCE" in msg
-        or "STOCKOUT" in msg.upper()
-        or "does not have enough resources" in msg
-    ):
+    # Capacity stockouts arrive in three classes: gax ResourceExhausted (429,
+    # handled above), gax ServiceUnavailable (503 with embedded
+    # ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS), and RuntimeError raised from
+    # wait_for_zonal_op when op.error carries the same code. Match on the
+    # canonical token regardless of exception class so the launch zone-walk
+    # actually walks instead of bubbling 503s straight up to the caller.
+    if "ZONE_RESOURCE" in upper or "STOCKOUT" in upper or "DOES NOT HAVE ENOUGH RESOURCES" in upper:
         return True
     if op is not None and getattr(op, "error", None):
         for e in op.error.errors:
@@ -308,6 +311,19 @@ def _safe_name(value: str) -> str:
     return value
 
 
+def public_key_path(key_file: str | Path) -> Path:
+    """Return the public-key sibling path written by ``ssh-keygen -f <key_file>``.
+
+    ``ssh-keygen`` appends ``.pub`` to the private-key filename verbatim, so
+    a private key at ``/tmp/foo.pem`` produces ``/tmp/foo.pem.pub``. Using
+    ``Path.with_suffix('.pub')`` would replace the ``.pem`` extension and
+    point at the wrong file (``/tmp/foo.pub``) — every caller MUST go through
+    this helper to stay aligned with the on-disk layout.
+    """
+    p = Path(key_file)
+    return p.with_name(p.name + ".pub")
+
+
 def generate_ssh_keypair(
     key_basename: str,
     *,
@@ -327,7 +343,7 @@ def generate_ssh_keypair(
     """
     name = _safe_name(key_basename)
     key_path = Path(key_dir) / f"{name}.pem"
-    pub_path = key_path.with_suffix(".pub")
+    pub_path = public_key_path(key_path)
 
     if key_path.exists() and pub_path.exists() and key_path.stat().st_size > 0:
         try:
@@ -358,7 +374,7 @@ def generate_ssh_keypair(
 
 def read_ssh_public_key(key_file: str) -> str:
     """Read the ``.pub`` sibling of a ``.pem`` produced by :func:`generate_ssh_keypair`."""
-    return Path(key_file).with_suffix(".pub").read_text().strip()
+    return public_key_path(key_file).read_text().strip()
 
 
 def _has_isv_description(description: str | None) -> bool:

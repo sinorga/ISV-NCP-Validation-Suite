@@ -49,6 +49,7 @@ from common.compute import (
     generate_ssh_keypair,
     is_sentinel,
     is_zone_unavailable,
+    public_key_path,
     read_ssh_public_key,
     resolve_image,
     resolve_project,
@@ -532,7 +533,7 @@ def main() -> int:
             except Exception as cleanup_exc:
                 print(f"Warning: firewall cleanup failed: {cleanup_exc}", file=sys.stderr)
         if key_created and key_file:
-            for path in (Path(key_file), Path(key_file).with_suffix(".pub")):
+            for path in (Path(key_file), public_key_path(key_file)):
                 try:
                     if path.exists():
                         path.chmod(0o600)

@@ -40,6 +40,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.compute import (
     delete_failed_zonal_instance,
     is_sentinel,
+    public_key_path,
     resolve_project,
     select_zones,
     wait_for_global_op,
@@ -165,7 +166,7 @@ def main() -> int:
     # PEM may exist after an aborted run even if the cloud resource is
     # gone.
     if args.delete_key_pair and key_created and not is_sentinel(args.key_file):
-        for path in (Path(args.key_file), Path(args.key_file).with_suffix(".pub")):
+        for path in (Path(args.key_file), public_key_path(args.key_file)):
             try:
                 if path.exists():
                     path.chmod(0o600)
