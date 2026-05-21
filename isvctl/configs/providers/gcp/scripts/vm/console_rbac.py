@@ -58,6 +58,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -576,13 +577,19 @@ def _run_self_provision_path(
     """Default path: create temp SAs + scoping VM, probe, then clean up."""
     result["mode"] = "self-provisioned"
 
+    # Per-process random discriminator so concurrent factory workers (each
+    # in its own worktree but sharing the same GCP project + RUN_ID) don't
+    # collide on the global SA / scoping-VM / firewall names. The script
+    # records the generated names in ``created`` and the finally: cleanup
+    # uses those same names, so the round-trip stays consistent.
+    worker_tag = uuid.uuid4().hex[:6]
     suffix = unique_suffix("rbac")[-9:]
-    denied_id = f"isv-denied{suffix}"
-    allowed_id = f"isv-allowed{suffix}"
-    other_name = unique_suffix("isv-rbac-other")
+    denied_id = f"isv-d-{worker_tag}{suffix}"
+    allowed_id = f"isv-a-{worker_tag}{suffix}"
+    other_name = unique_suffix(f"isv-rbac-other-{worker_tag}")
     other_zone = zone
-    other_firewall_tag = unique_suffix("isv-rbac-tag")
-    other_firewall_name = unique_suffix("isv-rbac-fw")
+    other_firewall_tag = unique_suffix(f"isv-rbac-tag-{worker_tag}")
+    other_firewall_name = unique_suffix(f"isv-rbac-fw-{worker_tag}")
 
     created: dict[str, str] = {}
     # Mutable ownership trackers for async helpers that may raise after

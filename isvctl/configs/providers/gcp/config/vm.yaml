@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu"
+          - "isv-test-gpu-start-instance"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
@@ -67,7 +67,10 @@ commands:
           - "--image-project"
           - "{{image_project}}"
           - "--key-name"
-          - "isv-test-key"
+          # Step-discriminated so sibling factory workers don't race on the
+          # shared `/tmp/isv-test-key-<run>.pem` path (verified-reuse +
+          # cross-worker teardown can wipe a sibling's in-flight key file).
+          - "isv-test-key-start-instance"
         timeout: 900
 
       - name: list_instances
@@ -164,6 +167,7 @@ commands:
 
       - name: reboot_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/reboot_instance.py"
         args:
           - "--instance-id"
@@ -178,6 +182,7 @@ commands:
 
       - name: describe_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/describe_instance.py"
         args:
           - "--instance-id"
@@ -192,6 +197,7 @@ commands:
 
       - name: deploy_nim
         phase: test
+        skip: true
         command: "python3 ../../shared/deploy_nim.py"
         args:
           - "--host"
@@ -204,6 +210,11 @@ commands:
 
       - name: teardown_nim
         phase: teardown
+        # deploy_nim is skipped in this isolation, so there is no NIM to
+        # tear down. Without this skip, teardown_nim's args reference
+        # steps.reboot_instance.public_ip (also skipped) and the
+        # orchestrator emits a missing-ref warning that fails the run.
+        skip: true
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"

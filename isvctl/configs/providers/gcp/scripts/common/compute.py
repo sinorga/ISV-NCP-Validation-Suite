@@ -193,9 +193,15 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
-        "ZONE_RESOURCE" in msg
-        or "STOCKOUT" in msg.upper()
+    # The capacity-stockout payload arrives either as a RuntimeError raised
+    # from wait_for_zonal_op (operation-level error) OR as a synchronous
+    # google.api_core.ServiceUnavailable / 503 from instances.insert itself
+    # (request-level error). Match on the wire tokens regardless of the
+    # outer exception type so both shapes drive the multi-zone walk.
+    upper = msg.upper()
+    if (
+        "ZONE_RESOURCE" in upper
+        or "STOCKOUT" in upper
         or "does not have enough resources" in msg
     ):
         return True
@@ -351,6 +357,13 @@ def generate_ssh_keypair(
         capture_output=True,
         timeout=30,
     )
+    # ssh-keygen always emits the public key as `<keyfile>.pub` (appending,
+    # not replacing the suffix), so a `<name>.pem` private key produces a
+    # `<name>.pem.pub` file. Rename to the `<name>.pub` sibling so callers
+    # using `Path(key_file).with_suffix(".pub")` find it.
+    keygen_pub = Path(str(key_path) + ".pub")
+    if keygen_pub.exists() and keygen_pub != pub_path:
+        keygen_pub.replace(pub_path)
     key_path.chmod(0o400)
     print(f"Generated SSH keypair at {key_path}", file=sys.stderr)
     return str(key_path), True
