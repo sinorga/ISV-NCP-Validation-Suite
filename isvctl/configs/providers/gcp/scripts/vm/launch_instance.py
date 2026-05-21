@@ -29,6 +29,7 @@ are set, the stub describes the existing VM instead of creating one.
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import sys
@@ -409,11 +410,24 @@ def main() -> int:
             zone=candidate_zones[0],
         )
 
-        # Multi-zone walk classifying all 4 capacity-error wire shapes.
+        # Multi-zone walk classifying all 4 capacity-error wire shapes. A
+        # hard wall-time budget bounds the walk so a project hammered by
+        # parallel workers (each insert can spin internal client retries
+        # for 30-90s under a tight quota) cannot exhaust the 900s step
+        # timeout before producing a structured failure JSON. 600s leaves
+        # the post-walk readiness gates ~300s.
         leaked: list[str] = []
         last_error: Exception | None = None
         effective_zone: str | None = None
+        walk_deadline = time.monotonic() + 600
         for zone in candidate_zones:
+            if time.monotonic() >= walk_deadline:
+                result["leaked_zones"] = list(leaked)
+                return _emit_failed(
+                    result,
+                    f"multi-zone walk wall-time budget exhausted after {len(leaked)} STOCKOUT zones "
+                    f"(last error: {last_error}) — operator capacity blocker",
+                )
             # Re-stamp zonal proto fields (machineType / disk_type) for this zone.
             instance_proto.machine_type = _zonal(zone, "machineTypes", args.instance_type)
             for d in instance_proto.disks:
@@ -422,7 +436,11 @@ def main() -> int:
 
             print(f"Attempting instances.insert in {zone}...", file=sys.stderr)
             try:
-                op = instances_client.insert(project=project, zone=zone, instance_resource=instance_proto)
+                # Per-call ``timeout`` caps the synchronous request wall
+                # time so the google-api-core 503-retry policy cannot
+                # spin a single zone for 60-90s while every other zone
+                # is also stocked out.
+                op = instances_client.insert(project=project, zone=zone, instance_resource=instance_proto, timeout=20)
                 result["instance_created"] = True
                 # Stamp the attempted zone BEFORE the wait so a non-capacity
                 # wait failure still surfaces a zone for teardown — without
@@ -435,6 +453,19 @@ def main() -> int:
                 break
             except Exception as exc:
                 last_error = exc
+                exc_msg = str(exc)
+                # 409 ``already exists`` indicates a deterministic-name
+                # instance left behind by a previous run whose SIGKILL'd
+                # script never reached the teardown path. The walker
+                # cleans it up best-effort and continues to the next
+                # zone — without this, every subsequent live attempt
+                # would deadlock on the same name conflict.
+                if "409" in exc_msg and "already exists" in exc_msg:
+                    print(f"  zone {zone} has leaked instance from prior run; deleting", file=sys.stderr)
+                    delete_failed_zonal_instance(instances_client, project, zone, suffix_name)
+                    leaked.append(zone)
+                    result["leaked_zones"] = list(leaked)
+                    continue
                 if is_zone_unavailable(exc):
                     print(f"  zone {zone} unavailable: {exc}", file=sys.stderr)
                     # Shapes 2 / 4 may leave a partial record — reclaim it
@@ -466,13 +497,30 @@ def main() -> int:
         result["zone"] = effective_zone
         result["availability_zone"] = effective_zone
 
-        # Poll for state + external IP.
+        # Poll for state + external IP. The harness host occasionally
+        # drops the TLS connection to compute.googleapis.com mid-poll
+        # (RemoteDisconnected, NameResolutionError on the auth refresh).
+        # Treat those as transient and keep polling instead of aborting
+        # the whole launch — the VM is already provisioning server-side.
+        from google.api_core import exceptions as gax_exceptions
+
+        transient_get_errors: tuple[type[BaseException], ...] = (
+            gax_exceptions.ServiceUnavailable,
+            gax_exceptions.DeadlineExceeded,
+            gax_exceptions.InternalServerError,
+            ConnectionError,
+            TimeoutError,
+            http.client.RemoteDisconnected,
+        )
         for _ in range(40):
-            inst = instances_client.get(project=project, zone=effective_zone, instance=suffix_name)
-            state = canonical_state(getattr(inst, "status", None))
-            result["state"] = state
-            if state == "running":
-                break
+            try:
+                inst = instances_client.get(project=project, zone=effective_zone, instance=suffix_name)
+                state = canonical_state(getattr(inst, "status", None))
+                result["state"] = state
+                if state == "running":
+                    break
+            except transient_get_errors as exc:
+                print(f"Warning: state poll transient error: {exc}", file=sys.stderr)
             time.sleep(5)
 
         public_ip = wait_for_public_ip(instances_client, project, effective_zone, suffix_name, timeout=180, interval=5)
@@ -481,7 +529,17 @@ def main() -> int:
         result["public_ip"] = public_ip
 
         # Refresh private IP + subnet / network shorts from the final state.
-        inst = instances_client.get(project=project, zone=effective_zone, instance=suffix_name)
+        # Same transient-tolerance as the polling loop above — a single
+        # blip here would otherwise erase the just-collected zone + IP.
+        for refresh_attempt in range(3):
+            try:
+                inst = instances_client.get(project=project, zone=effective_zone, instance=suffix_name)
+                break
+            except transient_get_errors as exc:
+                if refresh_attempt == 2:
+                    raise
+                print(f"Warning: nic refresh transient error: {exc}", file=sys.stderr)
+                time.sleep(5)
         nic = (inst.network_interfaces or [None])[0]
         if nic:
             result["private_ip"] = getattr(nic, "network_i_p", "")

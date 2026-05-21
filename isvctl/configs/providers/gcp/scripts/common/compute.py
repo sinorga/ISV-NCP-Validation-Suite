@@ -112,11 +112,9 @@ def resolve_project(arg_project: str | None = None) -> str:
         if value:
             return value
     try:
-        import google.auth  # noqa: PLC0415 — lazy so non-GCP linters don't need the dep
+        import google.auth
     except ImportError as exc:  # pragma: no cover
-        raise RuntimeError(
-            "google-cloud-compute / google-auth not installed; install the GCP extra"
-        ) from exc
+        raise RuntimeError("google-cloud-compute / google-auth not installed; install the GCP extra") from exc
     _credentials, project = google.auth.default()
     if not project:
         raise RuntimeError(
@@ -175,8 +173,7 @@ def select_zones(zone_or_region: str, preferred: tuple[str, ...] = PREFERRED_ZON
     if not in_region:
         regions = sorted({z.rsplit("-", 1)[0] for z in preferred})
         raise ValueError(
-            f"region {value!r} has no preferred zones — pin a full zone "
-            f"(e.g. {value}-a) or use one of {regions}."
+            f"region {value!r} has no preferred zones — pin a full zone (e.g. {value}-a) or use one of {regions}."
         )
     cross_region = [z for z in preferred if not z.startswith(f"{value}-")]
     return in_region + cross_region
@@ -185,19 +182,29 @@ def select_zones(zone_or_region: str, preferred: tuple[str, ...] = PREFERRED_ZON
 def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     """Classify an error as a zone-capacity / unavailability shape (all 4)."""
     try:
-        from google.api_core import exceptions as gax_exceptions  # noqa: PLC0415
+        from google.api_core import exceptions as gax_exceptions
     except ImportError:
         gax_exceptions = None  # type: ignore[assignment]
     if gax_exceptions is not None and isinstance(err, gax_exceptions.ResourceExhausted):
         return True
+    # The per-call ``timeout`` we pass to ``instances.insert`` raises
+    # ``DeadlineExceeded`` when google-api-core's 503-retry policy spins
+    # past the budget — treat that as "this zone is unavailable, walk
+    # on" rather than re-raising and aborting the walk.
+    if gax_exceptions is not None and isinstance(err, gax_exceptions.DeadlineExceeded):
+        return True
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
-        "ZONE_RESOURCE" in msg
-        or "STOCKOUT" in msg.upper()
-        or "does not have enough resources" in msg
-    ):
+    # GCE reports capacity exhaustion as 503 ServiceUnavailable on the
+    # synchronous insert path (``ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS``
+    # in the message) and as a RuntimeError joined from ``op.error`` on the
+    # long-poll path. Gating the message-content check on RuntimeError
+    # alone misses the pre-launch 503 — the walker then bails at the first
+    # stocked-out zone instead of trying the next preferred zone. Match
+    # the documented GCE capacity tokens regardless of exception type.
+    upper = msg.upper()
+    if "ZONE_RESOURCE" in upper or "STOCKOUT" in upper or "does not have enough resources" in msg:
         return True
     if op is not None and getattr(op, "error", None):
         for e in op.error.errors:
@@ -265,7 +272,7 @@ def wait_for_public_ip(
     matches the AWS oracle's narrow-transient catch.
     """
     try:
-        from google.api_core import exceptions as gax_exceptions  # noqa: PLC0415
+        from google.api_core import exceptions as gax_exceptions
     except ImportError:
         gax_exceptions = None  # type: ignore[assignment]
     transient_gax: tuple[type[Exception], ...] = ()
@@ -302,8 +309,7 @@ def _safe_name(value: str) -> str:
     value = (value or "").strip()
     if not value or not _GCE_NAME_RE.fullmatch(value):
         raise ValueError(
-            f"invalid GCE resource name {value!r}: must match {_GCE_NAME_RE.pattern} "
-            "(1-63 chars, RFC 1035)."
+            f"invalid GCE resource name {value!r}: must match {_GCE_NAME_RE.pattern} (1-63 chars, RFC 1035)."
         )
     return value
 
@@ -351,6 +357,16 @@ def generate_ssh_keypair(
         capture_output=True,
         timeout=30,
     )
+    # ssh-keygen writes the public key by appending ``.pub`` to ``-f`` —
+    # i.e., ``foo.pem.pub``, not ``foo.pub``. Move it into the documented
+    # ``.pub`` sibling so callers using ``Path.with_suffix(".pub")``
+    # (read_ssh_public_key, cleanup loops, the verified-reuse check above)
+    # find the public key. Without this rename the very next call to
+    # ``read_ssh_public_key`` would FileNotFoundError on the missing
+    # ``foo.pub`` and the launch step would fail before any RBAC probe.
+    generated_pub = Path(f"{key_path}.pub")
+    if generated_pub.exists() and generated_pub != pub_path:
+        generated_pub.replace(pub_path)
     key_path.chmod(0o400)
     print(f"Generated SSH keypair at {key_path}", file=sys.stderr)
     return str(key_path), True
@@ -404,8 +420,7 @@ def create_ssh_firewall_rule(
         tag_match = target_tag in (existing.target_tags or [])
         source_match = source_range in (existing.source_ranges or [])
         port_match = any(
-            (a.I_p_protocol or "").lower() == "tcp" and "22" in (a.ports or [])
-            for a in (existing.allowed or [])
+            (a.I_p_protocol or "").lower() == "tcp" and "22" in (a.ports or []) for a in (existing.allowed or [])
         )
         if not _has_isv_description(existing.description):
             raise RuntimeError(
@@ -420,7 +435,7 @@ def create_ssh_firewall_rule(
         return safe_name, False
 
     try:
-        from google.cloud import compute_v1  # noqa: PLC0415
+        from google.cloud import compute_v1
     except ImportError as exc:  # pragma: no cover
         raise RuntimeError("google-cloud-compute is not installed") from exc
 
@@ -481,7 +496,7 @@ def resolve_image(images_client: Any, project: str, image_arg: str | None) -> tu
         )
 
     try:
-        from google.api_core import exceptions as gax_exceptions  # noqa: PLC0415
+        from google.api_core import exceptions as gax_exceptions
     except ImportError:
         gax_exceptions = None  # type: ignore[assignment]
     not_found_types: tuple[type[Exception], ...] = ()
@@ -506,8 +521,7 @@ def resolve_image(images_client: Any, project: str, image_arg: str | None) -> tu
             raise
 
     raise RuntimeError(
-        f"could not resolve image {image_arg!r} in {project!r} or {DEFAULT_IMAGE_PROJECT!r}: "
-        f"{last_not_found}"
+        f"could not resolve image {image_arg!r} in {project!r} or {DEFAULT_IMAGE_PROJECT!r}: {last_not_found}"
     )
 
 
@@ -518,10 +532,12 @@ def delete_failed_zonal_instance(client: Any, project: str, zone: str, name: str
     zone_capacity_error_shapes inventory may leave a phantom instance
     record in the failed zone. Reclaiming it prevents leaks across the
     walk. Returns True iff the delete operation acked successfully (or
-    NotFound, which means the record was already absent).
+    NotFound, which means the record was already absent). Per-call
+    ``timeout`` matches the launch insert so a phantom-delete probe in a
+    busy zone never burns more than its share of the walker's budget.
     """
     try:
-        op = client.delete(project=project, zone=zone, instance=name)
+        op = client.delete(project=project, zone=zone, instance=name, timeout=20)
     except Exception as exc:
         if "404" in str(exc) or "notFound" in str(exc).lower():
             return True
@@ -563,8 +579,8 @@ def fetch_adc_caller_email() -> str | None:
     whether that's a hard error.
     """
     try:
-        import google.auth  # noqa: PLC0415
-        import google.auth.transport.requests  # noqa: PLC0415
+        import google.auth
+        import google.auth.transport.requests
     except ImportError:
         return None
     try:
@@ -574,8 +590,9 @@ def fetch_adc_caller_email() -> str | None:
         if not token:
             return None
         url = f"https://oauth2.googleapis.com/tokeninfo?access_token={token}"
-        with urllib.request.urlopen(url, timeout=10) as resp:  # noqa: S310 — fixed GCP endpoint
-            import json  # noqa: PLC0415
+        with urllib.request.urlopen(url, timeout=10) as resp:
+            import json
+
             body = json.loads(resp.read().decode("utf-8"))
         return body.get("email")
     except Exception:

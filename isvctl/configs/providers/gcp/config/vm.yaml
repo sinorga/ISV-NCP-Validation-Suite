@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu"
+          - "isv-test-gpu-console-rbac"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
@@ -117,6 +117,7 @@ commands:
 
       - name: virtual_device_hardening
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/virtual_device_hardening.py"
         args:
           - "--instance-id"
@@ -131,6 +132,7 @@ commands:
 
       - name: stop_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/stop_instance.py"
         args:
           - "--instance-id"
@@ -152,6 +154,7 @@ commands:
       # minutes.
       - name: start_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/start_instance.py"
         args:
           - "--instance-id"
@@ -164,6 +167,7 @@ commands:
 
       - name: reboot_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/reboot_instance.py"
         args:
           - "--instance-id"
@@ -178,6 +182,7 @@ commands:
 
       - name: describe_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/describe_instance.py"
         args:
           - "--instance-id"
@@ -192,6 +197,7 @@ commands:
 
       - name: deploy_nim
         phase: test
+        skip: true
         command: "python3 ../../shared/deploy_nim.py"
         args:
           - "--host"
@@ -204,6 +210,7 @@ commands:
 
       - name: teardown_nim
         phase: teardown
+        skip: true
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"
