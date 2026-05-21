@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu-deploy-nim"
+          - "isv-test-gpu"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
