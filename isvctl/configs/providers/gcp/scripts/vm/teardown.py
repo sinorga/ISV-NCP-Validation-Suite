@@ -165,7 +165,7 @@ def main() -> int:
     # PEM may exist after an aborted run even if the cloud resource is
     # gone.
     if args.delete_key_pair and key_created and not is_sentinel(args.key_file):
-        for path in (Path(args.key_file), Path(args.key_file).with_suffix(".pub")):
+        for path in (Path(args.key_file), Path(f"{args.key_file}.pub")):
             try:
                 if path.exists():
                     path.chmod(0o600)

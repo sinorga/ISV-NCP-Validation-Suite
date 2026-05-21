@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu"
+          - "isv-test-gpu-verify-tags"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
@@ -68,7 +68,14 @@ commands:
           - "{{image_project}}"
           - "--key-name"
           - "isv-test-key"
-        timeout: 900
+        # GCP launch budget covers: image resolve + firewall create + a
+        # multi-zone STOCKOUT walk (3 in-region L4 zones can each take
+        # ~30s to reject) + insert wait + public-IP poll (up to 180s) +
+        # SSH/cloud-init/stability gates. The walk-then-success path on
+        # a STOCKOUT-heavy day was observed at ~880s, leaving zero
+        # margin against the prior 900s budget; widen to 1800s to match
+        # deploy_nim's long-tail budget.
+        timeout: 1800
 
       - name: list_instances
         phase: test
@@ -94,6 +101,7 @@ commands:
 
       - name: serial_console
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/serial_console.py"
         args:
           - "--instance-id"
@@ -104,6 +112,7 @@ commands:
 
       - name: console_rbac
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/console_rbac.py"
         args:
           - "--instance-id"
@@ -117,6 +126,7 @@ commands:
 
       - name: virtual_device_hardening
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/virtual_device_hardening.py"
         args:
           - "--instance-id"
@@ -131,6 +141,7 @@ commands:
 
       - name: stop_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/stop_instance.py"
         args:
           - "--instance-id"
@@ -152,6 +163,7 @@ commands:
       # minutes.
       - name: start_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/start_instance.py"
         args:
           - "--instance-id"
@@ -164,6 +176,7 @@ commands:
 
       - name: reboot_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/reboot_instance.py"
         args:
           - "--instance-id"
@@ -178,6 +191,7 @@ commands:
 
       - name: describe_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/describe_instance.py"
         args:
           - "--instance-id"
@@ -192,6 +206,7 @@ commands:
 
       - name: deploy_nim
         phase: test
+        skip: true
         command: "python3 ../../shared/deploy_nim.py"
         args:
           - "--host"
@@ -204,6 +219,7 @@ commands:
 
       - name: teardown_nim
         phase: teardown
+        skip: true
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"

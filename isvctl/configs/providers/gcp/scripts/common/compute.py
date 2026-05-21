@@ -193,7 +193,12 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
+    # Zone-capacity diagnostics surface as either a RuntimeError from
+    # wait_for_zonal_op or a google.api_core ServiceUnavailable (503
+    # ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS) on the insert call.
+    # Trust the diagnostic marker strings regardless of the wrapper
+    # class — these tokens only appear in zone-capacity errors.
+    if (
         "ZONE_RESOURCE" in msg
         or "STOCKOUT" in msg.upper()
         or "does not have enough resources" in msg
@@ -327,7 +332,11 @@ def generate_ssh_keypair(
     """
     name = _safe_name(key_basename)
     key_path = Path(key_dir) / f"{name}.pem"
-    pub_path = key_path.with_suffix(".pub")
+    # ssh-keygen -f <key>.pem writes the public key to <key>.pem.pub
+    # (appends ".pub"), not <key>.pub (which is what with_suffix(".pub")
+    # would produce). Use string append so the reuse + read paths look
+    # at the file ssh-keygen actually wrote.
+    pub_path = Path(f"{key_path}.pub")
 
     if key_path.exists() and pub_path.exists() and key_path.stat().st_size > 0:
         try:
@@ -358,7 +367,7 @@ def generate_ssh_keypair(
 
 def read_ssh_public_key(key_file: str) -> str:
     """Read the ``.pub`` sibling of a ``.pem`` produced by :func:`generate_ssh_keypair`."""
-    return Path(key_file).with_suffix(".pub").read_text().strip()
+    return Path(f"{key_file}.pub").read_text().strip()
 
 
 def _has_isv_description(description: str | None) -> bool:
