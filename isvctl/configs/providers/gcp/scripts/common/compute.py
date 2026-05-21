@@ -182,6 +182,25 @@ def select_zones(zone_or_region: str, preferred: tuple[str, ...] = PREFERRED_ZON
     return in_region + cross_region
 
 
+def is_already_exists(err: Exception) -> bool:
+    """Classify an error as a 409 already-exists collision.
+
+    A failed prior attempt under the same ``RUN_ID`` leaves an instance
+    record in some zone; the next launch insert collides with HTTP 409
+    and aborts mid-walk even though the offending resource is one we
+    own. The walk reclaims it via ``delete_failed_zonal_instance`` and
+    retries the same zone once.
+    """
+    try:
+        from google.api_core import exceptions as gax_exceptions  # noqa: PLC0415
+    except ImportError:
+        gax_exceptions = None  # type: ignore[assignment]
+    if gax_exceptions is not None and isinstance(err, gax_exceptions.Conflict):
+        return True
+    msg = str(err) if err else ""
+    return "409" in msg and "already exists" in msg.lower()
+
+
 def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     """Classify an error as a zone-capacity / unavailability shape (all 4)."""
     try:

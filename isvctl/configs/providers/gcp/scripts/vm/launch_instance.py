@@ -47,6 +47,7 @@ from common.compute import (
     create_ssh_firewall_rule,
     delete_failed_zonal_instance,
     generate_ssh_keypair,
+    is_already_exists,
     is_sentinel,
     is_zone_unavailable,
     public_key_path,
@@ -423,7 +424,21 @@ def main() -> int:
 
             print(f"Attempting instances.insert in {zone}...", file=sys.stderr)
             try:
-                op = instances_client.insert(project=project, zone=zone, instance_resource=instance_proto)
+                try:
+                    op = instances_client.insert(project=project, zone=zone, instance_resource=instance_proto)
+                except Exception as exc:
+                    # A 409 here means a prior attempt under the same
+                    # RUN_ID leaked an instance record in this zone. The
+                    # canonical name is unique to our test, so reclaim
+                    # the leaker and retry the same zone once — without
+                    # this, the walk abandons the only zone that had
+                    # capacity for the prior attempt.
+                    if not is_already_exists(exc):
+                        raise
+                    print(f"  zone {zone} has leaked {suffix_name}: deleting and retrying", file=sys.stderr)
+                    if not delete_failed_zonal_instance(instances_client, project, zone, suffix_name):
+                        raise
+                    op = instances_client.insert(project=project, zone=zone, instance_resource=instance_proto)
                 result["instance_created"] = True
                 # Stamp the attempted zone BEFORE the wait so a non-capacity
                 # wait failure still surfaces a zone for teardown — without
@@ -495,8 +510,12 @@ def main() -> int:
         # and consecutive-success SSH stability. All three must pass to
         # report success — first SSH success alone may be a transient
         # sshd that immediately drops as the guest re-applies metadata
-        # keys.
-        signals = _wait_for_guest_signal(public_ip, SSH_USER, key_file, ssh_attempts=24)
+        # keys. Heavy custom images (e.g. NCP CUDA + Docker base) need
+        # the GCE guest agent ~6+ minutes to inject the ssh-keys metadata
+        # into the ubuntu user's authorized_keys, so the budget here is
+        # ~10 min (60 * 10s) — fits inside the vm.yaml 900s step timeout
+        # after zone-walk overhead.
+        signals = _wait_for_guest_signal(public_ip, SSH_USER, key_file, ssh_attempts=60)
         result["ssh_ready"] = signals["ssh"] and signals["stable"]
         result["cloud_init_ready"] = signals["cloud_init"]
         result["ssh_stable"] = signals["stable"]
