@@ -73,6 +73,7 @@ from common.compute import (
     read_ssh_public_key,
     resolve_project,
     select_zones,
+    ssh_public_key_path,
     unique_suffix,
 )
 
@@ -755,7 +756,7 @@ def _run_self_provision_path(
                 cleanup_errors.append(f"scoping firewall cleanup: {exc}")
 
         if key_created and key_path:
-            for path in (Path(key_path), Path(key_path).with_suffix(".pub")):
+            for path in (Path(key_path), ssh_public_key_path(key_path)):
                 try:
                     if path.exists():
                         path.chmod(0o600)

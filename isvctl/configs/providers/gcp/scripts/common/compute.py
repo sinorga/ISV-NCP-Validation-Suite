@@ -193,9 +193,16 @@ def is_zone_unavailable(err: Exception, op: Any = None) -> bool:
     msg = str(err) if err else ""
     if "does not exist in zone" in msg and "machineType" in msg:
         return True
-    if isinstance(err, RuntimeError) and (
-        "ZONE_RESOURCE" in msg
-        or "STOCKOUT" in msg.upper()
+    # GCE returns ``503 SERVICE UNAVAILABLE`` carrying
+    # ``ZONE_RESOURCE_POOL_EXHAUSTED`` / ``STOCKOUT`` for capacity stockouts at
+    # ``instances.insert``. That comes through as
+    # ``google.api_core.exceptions.ServiceUnavailable`` — neither
+    # ``ResourceExhausted`` nor ``RuntimeError`` — but the tokens live in the
+    # exception message, so accept the token regardless of exception class.
+    upper = msg.upper()
+    if (
+        "ZONE_RESOURCE" in upper
+        or "STOCKOUT" in upper
         or "does not have enough resources" in msg
     ):
         return True
@@ -327,7 +334,10 @@ def generate_ssh_keypair(
     """
     name = _safe_name(key_basename)
     key_path = Path(key_dir) / f"{name}.pem"
-    pub_path = key_path.with_suffix(".pub")
+    # ssh-keygen appends ``.pub`` to the full ``-f`` argument, so the public
+    # half lives at ``<key_path>.pub`` — NOT ``key_path.with_suffix(".pub")``
+    # (which would replace ``.pem`` and produce a sibling that never exists).
+    pub_path = ssh_public_key_path(key_path)
 
     if key_path.exists() and pub_path.exists() and key_path.stat().st_size > 0:
         try:
@@ -356,9 +366,20 @@ def generate_ssh_keypair(
     return str(key_path), True
 
 
+def ssh_public_key_path(key_file: str | Path) -> Path:
+    """Return the ``.pub`` path ssh-keygen writes for the given private key path.
+
+    ``ssh-keygen -f /tmp/foo.pem`` writes the public half to
+    ``/tmp/foo.pem.pub`` — appending ``.pub`` to the full ``-f`` argument
+    rather than replacing the extension. ``Path.with_suffix(".pub")``
+    would incorrectly resolve to ``/tmp/foo.pub``.
+    """
+    return Path(f"{key_file}.pub")
+
+
 def read_ssh_public_key(key_file: str) -> str:
     """Read the ``.pub`` sibling of a ``.pem`` produced by :func:`generate_ssh_keypair`."""
-    return Path(key_file).with_suffix(".pub").read_text().strip()
+    return ssh_public_key_path(key_file).read_text().strip()
 
 
 def _has_isv_description(description: str | None) -> bool:

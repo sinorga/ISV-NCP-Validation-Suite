@@ -53,7 +53,7 @@ commands:
         command: "python3 ../scripts/vm/launch_instance.py"
         args:
           - "--name"
-          - "isv-test-gpu"
+          - "isv-test-gpu-stop-instance"
           - "--instance-type"
           - "{{instance_type}}"
           - "--region"
@@ -67,8 +67,16 @@ commands:
           - "--image-project"
           - "{{image_project}}"
           - "--key-name"
-          - "isv-test-key"
-        timeout: 900
+          # Step-discriminated so sibling factory workers don't race on the
+          # shared `/tmp/isv-test-key-<run>.pem` path (verified-reuse +
+          # cross-worker teardown can wipe a sibling's in-flight key file).
+          - "isv-test-key-stop-instance"
+        # GCP launch budget covers: image resolve + firewall create + a
+        # multi-zone STOCKOUT walk (3 in-region L4 zones can each take
+        # ~30s to reject) + insert wait + public-IP poll (up to 180s) +
+        # SSH/cloud-init/stability gates. Observed at ~880s on STOCKOUT-
+        # heavy days, leaving zero margin against the prior 900s budget.
+        timeout: 1800
 
       - name: list_instances
         phase: test
@@ -152,6 +160,7 @@ commands:
       # minutes.
       - name: start_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/start_instance.py"
         args:
           - "--instance-id"
@@ -164,6 +173,7 @@ commands:
 
       - name: reboot_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/reboot_instance.py"
         args:
           - "--instance-id"
@@ -178,6 +188,7 @@ commands:
 
       - name: describe_instance
         phase: test
+        skip: true
         command: "python3 ../scripts/vm/describe_instance.py"
         args:
           - "--instance-id"
@@ -192,6 +203,7 @@ commands:
 
       - name: deploy_nim
         phase: test
+        skip: true
         command: "python3 ../../shared/deploy_nim.py"
         args:
           - "--host"
@@ -204,6 +216,11 @@ commands:
 
       - name: teardown_nim
         phase: teardown
+        # deploy_nim is skipped in this isolation, so there is no NIM to
+        # tear down. Without this skip, teardown_nim's args reference
+        # steps.reboot_instance.public_ip (also skipped) and the
+        # orchestrator emits a missing-ref warning that fails the run.
+        skip: true
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"
