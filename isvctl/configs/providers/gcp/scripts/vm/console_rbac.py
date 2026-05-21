@@ -204,7 +204,15 @@ def _probe_serial(project: str, zone: str, instance: str, token: str) -> tuple[i
 
 
 def _create_sa(project: str, account_id: str, caller_token: str) -> tuple[str | None, str]:
-    """Create a temporary service account, returning ``(email, error)``."""
+    """Create a temporary service account, returning ``(email, error)``.
+
+    A 409 ``ALREADY_EXISTS`` is treated as a deterministic-name SA left
+    behind by a previous run whose SIGKILL'd script never reached its
+    cleanup branch. We adopt the existing SA — the cleanup at the end of
+    ``_run_self_provision_path`` will delete it just like a freshly-
+    created one. Without this, every subsequent live attempt deadlocks
+    on the same name conflict before any RBAC probe runs.
+    """
     url = f"{IAM_BASE}/projects/{project}/serviceAccounts"
     status, body = _rest(
         "POST",
@@ -217,6 +225,10 @@ def _create_sa(project: str, account_id: str, caller_token: str) -> tuple[str | 
     )
     if status == 200 and isinstance(body, dict) and "email" in body:
         return body["email"], ""
+    if status == 409:
+        adopted = f"{account_id}@{project}.iam.gserviceaccount.com"
+        print(f"  adopting leaked SA {adopted} (409 ALREADY_EXISTS)", file=sys.stderr)
+        return adopted, ""
     return None, f"create SA status={status} body={body}"
 
 
