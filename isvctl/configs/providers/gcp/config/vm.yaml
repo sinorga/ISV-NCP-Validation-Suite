@@ -1,0 +1,267 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# NVIDIA CORPORATION, its affiliates and licensors retain all intellectual
+# property and proprietary rights in and to this material, related
+# documentation and any modifications thereto. Any use, reproduction,
+# disclosure or distribution of this material and related documentation
+# without an express license agreement from NVIDIA CORPORATION or
+# its affiliates is strictly prohibited.
+
+# GCP VM (Compute Engine) Validation Configuration
+#
+# Imports validations from the provider-agnostic VM canonical config.
+# Wires steps to GCP-specific stubs that drive the google-cloud-compute SDK
+# (Compute Engine v1 REST API).
+#
+# Steps:
+#   1. launch_instance              - compute_v1: Provisions GPU VM, emits IP/key/zone (setup)
+#   2. list_instances               - compute_v1: Lists instances via aggregatedList (test)
+#   3. verify_tags                  - compute_v1: Reads labels, projects to canonical suite keys (test)
+#   4. serial_console               - compute_v1: getSerialPortOutput probe (test)
+#   5. console_rbac                 - compute_v1 + IAMCredentials: temporary-SA scope probe (test)
+#   6. virtual_device_hardening     - compute_v1 + SSH: provider evidence + guest probes (test)
+#   7. stop_instance                - compute_v1: stop, wait TERMINATED (test)
+#   8. start_instance               - compute_v1: start, fresh IP, SSH stability (test)
+#   9. reboot_instance              - compute_v1: hard reset, wait SSH-drop, confirm reboot (test)
+#  10. describe_instance            - compute_v1: state/IP refresh, SSH/GPU validation anchor (test)
+#  11. deploy_nim                   - shared paramiko (test)
+#  12. teardown_nim                 - shared paramiko (teardown)
+#  13. teardown                     - compute_v1: delete instance + verified-reuse firewall + local key (teardown)
+#
+# Operator-overridable values flow through env vars:
+#   GCP_VM_INSTANCE_TYPE  - machine type (default: g2-standard-8 / L4)
+#   GCP_VM_REGION         - region or zone (default: us-central1; zone-pin honored)
+#   GCP_VM_IMAGE          - image short-name or self-link (default: DLVM L4 family)
+#   GCP_VM_IMAGE_PROJECT  - project hosting the image (default: deeplearning-platform-release)
+#   GCP_VM_SKIP_TEARDOWN  - "true" forwards --skip-destroy to teardown
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/gcp/config/vm.yaml
+
+import:
+  - ../../../suites/vm.yaml
+
+version: "1.0"
+
+commands:
+  vm:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      - name: launch_instance
+        phase: setup
+        command: "python3 ../scripts/vm/launch_instance.py"
+        args:
+          - "--name"
+          - "isv-test-gpu"
+          - "--instance-type"
+          - "{{instance_type}}"
+          - "--region"
+          - "{{region}}"
+          - "--vpc-id"
+          - "{{network}}"
+          - "--subnet-id"
+          - "{{subnetwork}}"
+          - "--ami-id"
+          - "{{image}}"
+          - "--image-project"
+          - "{{image_project}}"
+          - "--key-name"
+          - "isv-test-key"
+        timeout: 900
+
+      - name: list_instances
+        phase: test
+        command: "python3 ../scripts/vm/list_instances.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.launch_instance.vpc_id}}"
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+        timeout: 180
+
+      - name: verify_tags
+        phase: test
+        command: "python3 ../scripts/vm/describe_tags.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+        timeout: 60
+
+      - name: serial_console
+        phase: test
+        command: "python3 ../scripts/vm/serial_console.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+        timeout: 60
+
+      - name: console_rbac
+        phase: test
+        command: "python3 ../scripts/vm/console_rbac.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+        timeout: 300
+
+      - name: virtual_device_hardening
+        phase: test
+        command: "python3 ../scripts/vm/virtual_device_hardening.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+          - "--public-ip"
+          - "{{steps.launch_instance.public_ip}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+        timeout: 120
+
+      - name: stop_instance
+        phase: test
+        command: "python3 ../scripts/vm/stop_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--public-ip"
+          - "{{steps.launch_instance.public_ip}}"
+        timeout: 600
+
+      # Compute Engine post-stop/start sshd recovery on g2-standard-* + L4
+      # GPUs is observed at roughly 5-7 minutes (ephemeral external IP
+      # gets reassigned and the guest re-replays cloud-init on next
+      # boot); the step also runs an SSH-stability gate + cloud-init
+      # wait. 600s fits the documented recovery upper bound while still
+      # being tight enough to surface a hang rather than waiting 15
+      # minutes.
+      - name: start_instance
+        phase: test
+        command: "python3 ../scripts/vm/start_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+        timeout: 600
+
+      - name: reboot_instance
+        phase: test
+        command: "python3 ../scripts/vm/reboot_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--public-ip"
+          - "{{steps.start_instance.public_ip}}"
+        timeout: 900
+
+      - name: describe_instance
+        phase: test
+        command: "python3 ../scripts/vm/describe_instance.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--region"
+          - "{{steps.launch_instance.zone}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file}}"
+          - "--ssh-user"
+          - "{{ssh_user}}"
+        timeout: 180
+
+      - name: deploy_nim
+        phase: test
+        command: "python3 ../../shared/deploy_nim.py"
+        args:
+          - "--host"
+          - "{{steps.reboot_instance.public_ip}}"
+          - "--key-file"
+          - "{{steps.reboot_instance.key_file}}"
+          - "--user"
+          - "{{steps.reboot_instance.ssh_user}}"
+        timeout: 1800
+
+      - name: teardown_nim
+        phase: teardown
+        command: "python3 ../../shared/teardown_nim.py"
+        args:
+          - "--host"
+          - "{{steps.reboot_instance.public_ip}}"
+          - "--key-file"
+          - "{{steps.reboot_instance.key_file}}"
+          - "--user"
+          - "{{steps.reboot_instance.ssh_user}}"
+        timeout: 180
+
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/vm/teardown.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id | default('none', true)}}"
+          - "--region"
+          - "{{steps.launch_instance.zone | default('none', true)}}"
+          - "--delete-key-pair"
+          - "--delete-security-group"
+          - "--firewall-name"
+          - "{{steps.launch_instance.firewall_name | default('none', true)}}"
+          - "--firewall-created"
+          - "{{steps.launch_instance.firewall_created | default('false', true)}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file | default('none', true)}}"
+          - "--key-created"
+          - "{{steps.launch_instance.key_created | default('false', true)}}"
+          - "--instance-created"
+          - "{{steps.launch_instance.instance_created | default('false', true)}}"
+          - "--leaked-zones"
+          - "{{steps.launch_instance.leaked_zones | join(',') | default('none', true)}}"
+          - "{{teardown_flag}}"
+        timeout: 600
+
+tests:
+  cluster_name: "gcp-vm-validation"
+  description: "GCP VM (Compute Engine) validation tests"
+
+  settings:
+    region: "us-central1"
+    # `default(..., true)` treats empty strings as unset so an empty
+    # `GCP_VM_*` env var in the operator's .env still falls back to the
+    # vendor-shipping default (otherwise the empty value would silently
+    # forward into the argv and break the launch).
+    instance_type: "{{env.GCP_VM_INSTANCE_TYPE | default('g2-standard-8', true)}}"
+    image: "{{env.GCP_VM_IMAGE | default('none', true)}}"
+    image_project: "{{env.GCP_VM_IMAGE_PROJECT | default('none', true)}}"
+    network: "{{env.GCP_VM_NETWORK | default('default', true)}}"
+    subnetwork: "{{env.GCP_VM_SUBNETWORK | default('none', true)}}"
+    ssh_user: "{{env.GCP_VM_SSH_USER | default('ubuntu', true)}}"
+    teardown_flag: "{{(env.GCP_VM_SKIP_TEARDOWN == 'true') | ternary('--skip-destroy', '')}}"
+
+  # GROUP-NESTED validation overrides — isvtest accepts ONLY this shape.
+  # The cloud_init group flips CloudInitCheck to GCE's metadata endpoint
+  # so the probe stops hitting the AWS endpoint (which is unreachable on
+  # Compute Engine).
+  validations:
+    cloud_init:
+      checks:
+        CloudInitCheck:
+          metadata_url: "http://metadata.google.internal/computeMetadata/v1/"
+          metadata_headers:
+            Metadata-Flavor: "Google"
