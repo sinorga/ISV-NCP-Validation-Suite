@@ -451,6 +451,20 @@ def main() -> int:
                 break
             except Exception as exc:
                 last_error = exc
+                msg = str(exc)
+                # 409 "already exists" means a prior failed run leaked an
+                # instance with the same RUN_ID-suffixed name in this zone
+                # (the teardown step couldn't reach GCP, e.g. transient DNS
+                # blip). Reclaim it and continue the walk — the zone itself
+                # may be fine, but we burn it from this attempt to avoid
+                # an immediate insert-after-delete race. The leaked-zone
+                # context still goes to teardown for the global sweep.
+                if "already exists" in msg or " 409 " in f" {msg} ":
+                    print(f"  zone {zone} has a leaked record from a prior run; reclaiming", file=sys.stderr)
+                    delete_failed_zonal_instance(instances_client, project, zone, suffix_name)
+                    leaked.append(zone)
+                    result["leaked_zones"] = list(leaked)
+                    continue
                 if is_zone_unavailable(exc):
                     print(f"  zone {zone} unavailable: {exc}", file=sys.stderr)
                     # Shapes 2 / 4 may leave a partial record — reclaim it
