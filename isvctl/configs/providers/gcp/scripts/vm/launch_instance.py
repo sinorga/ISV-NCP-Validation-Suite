@@ -261,7 +261,7 @@ def _reuse_existing(args: argparse.Namespace, project: str) -> int:
         print(json.dumps(result, indent=2, default=str))
         return 1
 
-    signals = _wait_for_guest_signal(public_ip, SSH_USER, key_file, ssh_attempts=24)
+    signals = _wait_for_guest_signal(public_ip, SSH_USER, key_file, ssh_attempts=60)
     result["ssh_ready"] = signals["ssh"] and signals["stable"]
     result["cloud_init_ready"] = signals["cloud_init"]
     result["ssh_stable"] = signals["stable"]
