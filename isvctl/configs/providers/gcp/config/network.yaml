@@ -38,7 +38,7 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-sdn-hardware-fault-logging"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
@@ -47,16 +47,6 @@ commands:
 
       - name: vpc_crud
         phase: test
-        # Skipped from the live slice for this worker only. Live run #393bbfe9
-        # showed `vpc_crud_test.py` timing out at the AWS-shaped 120s budget
-        # because the RUN_ID-derived `isv-crud-3f06cc49` peerings from a
-        # prior failed run leave the recreated main in `is not ready`. The
-        # underlying per-attempt-random-name fix lives on the `vpc_crud`
-        # worker branch and will land via that branch's merge; `sdn_hardware_
-        # fault_logging` does not template-reference any `steps.vpc_crud.*`
-        # output, so narrowing the slice here only drops the orphan-collision
-        # blocker without losing real coverage for the assigned step.
-        skip: true
         command: "python3 ../scripts/network/vpc_crud_test.py"
         args:
           - "--region"
@@ -68,16 +58,6 @@ commands:
 
       - name: subnet_config
         phase: test
-        # Skipped from the live slice for this worker only. Live run #574faea6
-        # showed `subnet_test.py` colliding with the RUN_ID-based orphan
-        # network `isv-subnets-3f06cc49` left by a prior failed run
-        # (`409 ... already exists`); the orchestrator stops the test phase on
-        # that failure so `sdn_hardware_fault_logging` never executes. The
-        # underlying naming-collision fix lives on the `subnet_config` worker
-        # branch (per-attempt random network name) and will land via that
-        # branch's merge; this skip avoids modifying that sibling worker's
-        # stub while still letting `sdn_hardware_fault_logging` run end-to-end.
-        skip: true
         command: "python3 ../scripts/network/subnet_test.py"
         args:
           - "--region"
@@ -91,14 +71,6 @@ commands:
 
       - name: vpc_isolation
         phase: test
-        # Skipped from the live slice for this worker only. Same orphan-
-        # collision class as vpc_crud / subnet_config: isolation_test.py
-        # builds `isv-iso-a-<RUN_ID>` and `isv-iso-b-<RUN_ID>` via
-        # `unique_suffix`, which can collide with prior-run orphans and
-        # gate the rest of the test phase before `sdn_hardware_fault_logging`
-        # gets to run. `sdn_hardware_fault_logging` does not template-
-        # reference any `steps.vpc_isolation.*` output.
-        skip: true
         command: "python3 ../scripts/network/isolation_test.py"
         args:
           - "--region"
@@ -112,12 +84,6 @@ commands:
 
       - name: sg_crud
         phase: test
-        # Skipped from the live slice for this worker only. Same orphan-
-        # collision class — sg_crud_test.py builds RUN_ID-derived firewall
-        # and network names that collide with prior-run orphans, blocking
-        # downstream test steps. `sdn_hardware_fault_logging` does not
-        # template-reference any `steps.sg_crud.*` output.
-        skip: true
         command: "python3 ../scripts/network/sg_crud_test.py"
         args:
           - "--region"
@@ -129,11 +95,6 @@ commands:
 
       - name: security_blocking
         phase: test
-        # Skipped from the live slice for this worker only. Same orphan-
-        # collision class — security_test.py uses RUN_ID-derived naming.
-        # `sdn_hardware_fault_logging` does not template-reference any
-        # `steps.security_blocking.*` output.
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -145,34 +106,24 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        # Skipped from the live slice for this worker only. sg_scoping_test.py
-        # is a heavy multi-scope soak (workload/node/subnet/service) that uses
-        # RUN_ID-derived naming and burns large minutes-budgets even when it
-        # succeeds. `sdn_hardware_fault_logging` does not template-reference
-        # any `steps.sg_*_scoping.*` output; the four sg_scoping variants are
-        # narrowed out so the assigned step can actually run end-to-end.
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
 
       - name: sg_node_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
         timeout: 600
 
       - name: sg_subnet_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
@@ -191,7 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -204,7 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -217,7 +166,6 @@ commands:
 
       - name: connectivity_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -233,7 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -245,7 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -257,7 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -273,7 +218,6 @@ commands:
 
       - name: byoip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/byoip_test.py"
         args:
           - "--region"
@@ -287,7 +231,6 @@ commands:
 
       - name: stable_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -299,7 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -313,7 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
@@ -327,7 +268,6 @@ commands:
 
       - name: peering_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/peering_test.py"
         args:
           - "--region"
@@ -379,24 +319,3 @@ tests:
       checks:
         FloatingIpCheck:
           max_switch_seconds: 20
-
-  # FACTORY-HARNESS-BUG witness — DO NOT remove until the harness
-  # validation-overrides check is fixed.
-  #
-  # The harness `_check_knowledge_validation_overrides` /
-  # `_get_dotted_path` (`test_harness/validate.py:1240-1281`) splits the
-  # knowledge override path
-  # `validations.network.checks.VpcIpConfigCheck.auto_assign_ip_mode`,
-  # strips the leading `validations.` segment, then traverses from
-  # `resolved_config["tests"]` — so it expects the override at
-  # `tests.network.checks.<Validator>.<key>`, not at the GROUP-NESTED
-  # runtime location above. Without this duplicate, the static gate
-  # reports `validation override mismatch ... expected instance got
-  # <missing>` even though isvtest's actual validator runs with the
-  # override applied. Once the harness path resolution is fixed (either
-  # traverse from `tests.validations` or drop the strip) this block can
-  # be deleted.
-  network:
-    checks:
-      VpcIpConfigCheck:
-        auto_assign_ip_mode: instance
