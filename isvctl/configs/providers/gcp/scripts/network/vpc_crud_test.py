@@ -22,13 +22,14 @@ import json
 import os
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import resolve_project, wait_for_global_op
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -116,9 +117,16 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"passed": False, "mutation": "temporary_peering_add_remove"}
     networks = compute_v1.NetworksClient()
-    peer_name = unique_suffix(f"{name}-peer", length=4)
+    # Per-attempt random suffix instead of RUN_ID derived — an orphan peer
+    # from a sandbox-terminated prior run keeps stale peerings that block
+    # both peer-delete (`is not ready`) and main-create
+    # (`OPERATION_CANCELED_BY_USER`). A fresh peer name sidesteps the
+    # orphan entirely; the peer is short-lived and not subject to
+    # verified-reuse so randomness is safe.
+    attempt = uuid.uuid4().hex[:6]
+    peer_name = f"{name}-peer-{attempt}"
     peer_tracker: dict[str, bool] = {"created": False}
-    peering_name = unique_suffix("crud-peer", length=4)
+    peering_name = f"crud-peer-{attempt}"
     try:
         _insert_network(
             project,
@@ -223,7 +231,18 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    name = unique_suffix("isv-crud-iso")
+    # Per-attempt random suffix instead of RUN_ID — Compute Engine refuses
+    # to recreate a network name immediately after delete-DONE (returns
+    # ``OPERATION_CANCELED_BY_USER`` with empty user attribution on the
+    # async insert), and a prior aborted run can also leave the
+    # RUN_ID-suffixed name in an unrecoverable ``is not ready`` state
+    # that blocks delete + recreate. A fresh name per invocation
+    # sidesteps both failure modes; the network is short-lived (created
+    # + deleted within this script) so per-attempt entropy is safe.
+    # High-entropy randomness also supersedes the ``-iso-`` discriminator
+    # that an upstream slice used to keep parallel workers from racing on
+    # a shared RUN_ID.
+    name = f"isv-crud-{uuid.uuid4().hex[:8]}"
 
     result: dict[str, Any] = {
         "success": False,
@@ -233,6 +252,12 @@ def main() -> int:
         "network_id": name,
         "region": args.region,
     }
+
+    # No proactive sweep here: orphan isvtest networks from prior
+    # sandbox-killed runs (especially ones stuck in ``is not ready``)
+    # would exhaust the step timeout on remove_peering + delete waits.
+    # The random-suffix ``name`` above is the actual collision-avoidance
+    # mechanism; operator-side cleanup handles long-term hygiene.
 
     # Tracker is flipped TRUE by the on_dispatch callback inside
     # test_create_vpc the instant the insert() call returns, BEFORE the wait.
