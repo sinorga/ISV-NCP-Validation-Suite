@@ -38,7 +38,7 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-byoip-test"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
@@ -47,7 +47,6 @@ commands:
 
       - name: vpc_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_crud_test.py"
         args:
           - "--region"
@@ -59,7 +58,6 @@ commands:
 
       - name: subnet_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/subnet_test.py"
         args:
           - "--region"
@@ -73,7 +71,6 @@ commands:
 
       - name: vpc_isolation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/isolation_test.py"
         args:
           - "--region"
@@ -87,7 +84,6 @@ commands:
 
       - name: sg_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_crud_test.py"
         args:
           - "--region"
@@ -99,7 +95,6 @@ commands:
 
       - name: security_blocking
         phase: test
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -111,35 +106,30 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
 
       - name: sg_node_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
         timeout: 600
 
       - name: sg_subnet_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
 
       - name: sdn_hardware_fault_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -152,7 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -165,7 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -178,7 +166,6 @@ commands:
 
       - name: connectivity_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -194,7 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -206,7 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -218,7 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -242,17 +226,11 @@ commands:
           - "100.64.0.0/16"
           - "--standard-cidr"
           - "10.90.0.0/16"
-        # Compute Engine ops (network insert/delete + subnet insert/delete)
-        # each take ~15-30s; the step performs 2 pair-creates + readback +
-        # 4-resource cleanup which can exceed the original 120s window.
-        # Raised to 300s to match the wait_for_*_op SDK timeouts used in
-        # the stub and the typical timing of other network test steps.
-        timeout: 300
+        timeout: 120
         output_schema: byoip
 
       - name: stable_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -264,7 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -278,7 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
@@ -292,7 +268,6 @@ commands:
 
       - name: peering_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/peering_test.py"
         args:
           - "--region"
