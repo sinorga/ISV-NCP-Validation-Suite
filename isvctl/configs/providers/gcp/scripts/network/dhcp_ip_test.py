@@ -45,6 +45,13 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest dhcp_ip — verified-reuse marker"
 DEFAULT_IMAGE = "projects/debian-cloud/global/images/family/debian-12"
 SSH_USER = "isvtest"
+# Network tag matching create_vpc.py's firewall target_tags=["isvtest"].
+# Compute Engine firewalls bind by network tag, not by direct
+# "instance.security_group" reference — the instance MUST carry this tag
+# for ingress on tcp/22 to land; live run #9a7777fe failed at SSH because
+# the instance was tagless and the create_vpc firewall therefore did not
+# match.
+ISV_FIREWALL_TAG = "isvtest"
 
 
 @handle_gcp_errors
@@ -114,6 +121,7 @@ def main() -> int:
                     compute_v1.Items(key="ssh-keys", value=f"{SSH_USER}:{pubkey}"),
                 ]
             ),
+            tags=compute_v1.Tags(items=[ISV_FIREWALL_TAG]),
             service_accounts=[],
         )
         op = instances_c.insert(project=project, zone=zone, instance_resource=inst)
