@@ -23,6 +23,7 @@ import ipaddress
 import json
 import os
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +31,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.compute import (
     resolve_project,
-    unique_suffix,
     wait_for_global_op,
     wait_for_region_op,
 )
@@ -62,7 +62,14 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    network_name = unique_suffix("isv-subnets")
+    # Per-attempt random suffix instead of RUN_ID — a prior run killed
+    # by sandbox timeout can leave the network in an unrecoverable
+    # ``is not ready`` state that blocks both delete and recreate, and
+    # GCE refuses to recreate a name immediately after delete-DONE
+    # (``OPERATION_CANCELED_BY_USER``). A fresh name per invocation
+    # sidesteps both failure modes; the network is short-lived (created
+    # + deleted within this script).
+    network_name = f"isv-subnets-{uuid.uuid4().hex[:8]}"
     subnet_cidrs = _carve(args.cidr, args.subnet_count)
 
     networks = compute_v1.NetworksClient()
@@ -75,6 +82,11 @@ def main() -> int:
         "network_id": network_name,
         "region": args.region,
     }
+
+    # No proactive sweep: orphan isvtest networks from sandbox-killed
+    # prior runs may be stuck in ``is not ready`` and exhaust the step
+    # timeout on retried deletes. The random-suffix ``network_name``
+    # above is the actual collision-avoidance mechanism.
 
     created_subnets: list[str] = []
     network_created = False
@@ -127,6 +139,12 @@ def main() -> int:
             "count": len(subnets_emitted),
             "subnets": subnets_emitted,
         }
+        # SubnetConfigCheck reads ``step_output["subnets"]`` at top
+        # level for the subnet-count and multi-AZ assertions — the
+        # nested ``tests.create_subnets.subnets`` is the per-subtest
+        # record but is not what the validator inspects. Surface the
+        # same list at the contract path so the validator sees it.
+        result["subnets"] = subnets_emitted
 
         # az_distribution
         distinct_azs = {s["az"] for s in subnets_emitted}
