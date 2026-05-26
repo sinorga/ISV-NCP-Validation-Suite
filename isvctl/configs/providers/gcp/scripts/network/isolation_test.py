@@ -37,15 +37,33 @@ ISV_DESCRIPTION = "isvtest vpc_isolation — verified-reuse marker"
 def _insert_network(project: str, name: str, *, cleanup: list[str]) -> None:
     """Insert a network and wait. Stamps the cleanup tracker BEFORE the wait
     so a wait failure still leaves the partial-create visible to the caller's
-    cleanup loop."""
-    op = compute_v1.NetworksClient().insert(
-        project=project,
-        network_resource=compute_v1.Network(
+    cleanup loop.
+
+    A 409 ``AlreadyExists`` here means a prior killed run in the same
+    RUN_ID left an orphan ``isv-iso-*`` network behind. Verified-reuse it
+    via the ISV description marker so the same RUN_ID can recover from
+    its own leftovers; refuse to adopt a name we did not stamp.
+    """
+    networks = compute_v1.NetworksClient()
+
+    def _build() -> compute_v1.Network:
+        return compute_v1.Network(
             name=name,
             description=ISV_DESCRIPTION,
             auto_create_subnetworks=False,
-        ),
-    )
+        )
+
+    try:
+        op = networks.insert(project=project, network_resource=_build())
+    except gax.Conflict:
+        existing = networks.get(project=project, network=name)
+        if (existing.description or "") != ISV_DESCRIPTION:
+            raise RuntimeError(
+                f"network {name!r} exists in {project} without ISV ownership marker; refusing to adopt"
+            ) from None
+        del_op = networks.delete(project=project, network=name)
+        wait_for_global_op(project, del_op.name, timeout=300)
+        op = networks.insert(project=project, network_resource=_build())
     cleanup.append(name)
     wait_for_global_op(project, op.name, timeout=300)
 
