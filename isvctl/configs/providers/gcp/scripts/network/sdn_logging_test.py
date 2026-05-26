@@ -52,6 +52,18 @@ def _list_log_entries(filter_str: str, max_results: int = 50) -> tuple[bool, int
     return True, count
 
 
+def _iter_log_entries(filter_str: str, max_results: int = 50):
+    """Yield raw entries for the filter, or empty iterator on import/API
+    failure. The caller is expected to inspect ``payload``/``method_name``
+    fields directly."""
+    try:
+        from google.cloud import logging_v2  # type: ignore[attr-defined]
+    except ImportError:
+        return
+    client = logging_v2.Client()
+    yield from client.list_entries(filter_=filter_str, page_size=max_results, max_results=max_results)
+
+
 def _hardware_faults(project: str, network: str) -> dict[str, Any]:
     """Each of the four subtests issues its OWN Cloud Logging probe so the
     pass-signal cannot collapse to a single API call. AWS oracle does the
@@ -212,53 +224,73 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
         created = False
 
         # Poll Admin Activity logs for the three method names. Audit
-        # propagation lags ~30s; budget 120s with 5s interval.
-        deadline = time.monotonic() + 120
-        seen = {"insert": 0, "patch": 0, "delete": 0}
+        # propagation can take 1-5 min on Compute Engine; budget 480s
+        # with 10s interval. Filter is scoped by URL-encoded logName
+        # ('cloudaudit.googleapis.com%2Factivity' — Cloud Logging stores
+        # the slash in the log ID as %2F, and the `=` comparator is exact
+        # match) plus a `protoPayload.resourceName:<token>` substring test
+        # against the unique firewall name. methodNames are then inspected
+        # on each returned entry rather than embedded in the filter so a
+        # vendor API-version prefix change (v1.compute.* or compute.*) does
+        # not silently zero-out the seen counters.
+        deadline = time.monotonic() + 480
+        seen: dict[str, int] = {"insert": 0, "patch": 0, "delete": 0}
         reachable = False
-        base = f'logName="projects/{project}/logs/{AUDIT_LOG_NAME}" AND protoPayload.resourceName:"firewalls/{fw_name}"'
+        first_insert_entry = None
+        audit_log_id_encoded = AUDIT_LOG_NAME.replace("/", "%2F")
+        base = f'logName="projects/{project}/logs/{audit_log_id_encoded}" AND protoPayload.resourceName:"{fw_name}"'
         while time.monotonic() < deadline and not all(seen.values()):
-            for method in ("insert", "patch", "delete"):
-                if seen[method]:
+            try:
+                entries = list(_iter_log_entries(base, max_results=50))
+                reachable = True
+            except (gax.GoogleAPICallError, RuntimeError, TimeoutError):
+                entries = []
+            for entry in entries:
+                payload = getattr(entry, "payload", None) or {}
+                if isinstance(payload, dict):
+                    method_name = payload.get("methodName", "") or ""
+                    resource_name = payload.get("resourceName", "") or ""
+                else:
+                    method_name = getattr(payload, "method_name", "") or ""
+                    resource_name = getattr(payload, "resource_name", "") or ""
+                # Confirm the entry actually targets OUR firewall (defensive
+                # against the substring filter matching anything containing
+                # the unique suffix).
+                if fw_name not in resource_name:
                     continue
-                filt = base + f' AND protoPayload.methodName:"v1.compute.firewalls.{method}"'
-                api_ok, hits = _list_log_entries(filt, max_results=5)
-                reachable = reachable or api_ok
-                seen[method] = hits
+                # Match both `compute.firewalls.<op>` and
+                # `v1.compute.firewalls.<op>` to tolerate vendor API-version
+                # prefix differences across regions/log versions.
+                for op_name in ("insert", "patch", "delete"):
+                    if method_name.endswith(f"compute.firewalls.{op_name}"):
+                        seen[op_name] += 1
+                        if op_name == "insert" and first_insert_entry is None:
+                            first_insert_entry = entry
             if all(seen.values()):
                 break
-            time.sleep(5)
+            time.sleep(10)
 
         result["tests"]["audit_endpoint_reachable"] = {"passed": reachable}
         result["tests"]["create_rule_logged"] = {"passed": bool(seen["insert"])}
         # patch OR update — both Compute Engine method names valid.
         result["tests"]["modify_rule_logged"] = {"passed": bool(seen["patch"])}
         result["tests"]["delete_rule_logged"] = {"passed": bool(seen["delete"])}
-        # Audit-event field validation: inspect the actual log entry that
-        # corresponds to the insert call; require principalEmail + timestamp
-        # + resourceName all present per the protoPayload schema.
+        # Audit-event field validation: inspect the captured insert entry;
+        # require principalEmail + timestamp + resourceName all present per
+        # the protoPayload schema.
         fields_ok = False
-        if seen["insert"]:
-            try:
-                from google.cloud import logging_v2  # type: ignore[attr-defined]
-
-                lc = logging_v2.Client()
-                insert_filter = base + ' AND protoPayload.methodName:"v1.compute.firewalls.insert"'
-                for entry in lc.list_entries(filter_=insert_filter, page_size=1, max_results=1):
-                    payload = getattr(entry, "payload", None)
-                    if isinstance(payload, dict):
-                        auth = payload.get("authenticationInfo", {})
-                        actor = auth.get("principalEmail") if isinstance(auth, dict) else None
-                        resource = payload.get("resourceName")
-                    else:
-                        actor = getattr(payload, "authentication_info", None)
-                        actor = getattr(actor, "principal_email", None) if actor else None
-                        resource = getattr(payload, "resource_name", None)
-                    timestamp = getattr(entry, "timestamp", None)
-                    fields_ok = bool(actor) and bool(timestamp) and bool(resource)
-                    break
-            except Exception:
-                fields_ok = False
+        if first_insert_entry is not None:
+            payload = getattr(first_insert_entry, "payload", None)
+            if isinstance(payload, dict):
+                auth = payload.get("authenticationInfo", {})
+                actor = auth.get("principalEmail") if isinstance(auth, dict) else None
+                resource = payload.get("resourceName")
+            else:
+                auth = getattr(payload, "authentication_info", None) if payload else None
+                actor = getattr(auth, "principal_email", None) if auth else None
+                resource = getattr(payload, "resource_name", None) if payload else None
+            timestamp = getattr(first_insert_entry, "timestamp", None)
+            fields_ok = bool(actor) and bool(timestamp) and bool(resource)
         result["tests"]["audit_event_has_required_fields"] = {
             "passed": fields_ok,
             "actor_field": result["actor_field"],
