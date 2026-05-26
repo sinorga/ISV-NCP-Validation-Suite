@@ -203,7 +203,7 @@ def main() -> int:
                 service_accounts=[],
             )
 
-        names = [unique_suffix("isv-A"), unique_suffix("isv-B"), unique_suffix("isv-C")]
+        names = [unique_suffix("isv-a"), unique_suffix("isv-b"), unique_suffix("isv-c")]
         tags = [sg_allow, sg_allow, sg_deny]
         instances_data: dict[str, Any] = {}
         for n, tg in zip(names, tags):
