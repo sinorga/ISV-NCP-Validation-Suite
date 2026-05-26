@@ -38,7 +38,7 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-peering-test"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
@@ -47,13 +47,6 @@ commands:
 
       - name: vpc_crud
         phase: test
-        # Skipped from the live slice for this worker only. peering_test
-        # creates its own pair of VPCs + subnets and references no other
-        # step's output (only --region, --cidr-a, --cidr-b). Narrowing
-        # the slice avoids sibling-worker upstream-step failures (e.g.,
-        # vpc_crud timeout on shared substrate) blocking peering_test
-        # before it executes. Precedent: dns_test, stable_ip_test, sg_*.
-        skip: true
         command: "python3 ../scripts/network/vpc_crud_test.py"
         args:
           - "--region"
@@ -65,8 +58,6 @@ commands:
 
       - name: subnet_config
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/subnet_test.py"
         args:
           - "--region"
@@ -80,8 +71,6 @@ commands:
 
       - name: vpc_isolation
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/isolation_test.py"
         args:
           - "--region"
@@ -95,8 +84,6 @@ commands:
 
       - name: sg_crud
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sg_crud_test.py"
         args:
           - "--region"
@@ -108,8 +95,6 @@ commands:
 
       - name: security_blocking
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -121,40 +106,30 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
 
       - name: sg_node_scoping
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
         timeout: 600
 
       - name: sg_subnet_scoping
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
 
       - name: sdn_hardware_fault_logging
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -167,8 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -181,8 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -195,8 +166,6 @@ commands:
 
       - name: connectivity_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -212,8 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -225,8 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -238,8 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -255,8 +218,6 @@ commands:
 
       - name: byoip_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/byoip_test.py"
         args:
           - "--region"
@@ -270,8 +231,6 @@ commands:
 
       - name: stable_ip_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -283,8 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -298,8 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        # Skipped — non-dependency for peering_test; see vpc_crud above.
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
