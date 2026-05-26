@@ -128,6 +128,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
     instances_c = compute_v1.InstancesClient()
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     apply_key = f"apply_{scope}_rule"
     allowed_key = f"{scope}_allowed" if scope == "workload" else "target_node_allowed"
     blocked_key = "other_workload_blocked" if scope == "workload" else "other_node_blocked"
@@ -227,17 +228,18 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
             "message": f"untagged VM {name_other} does not carry firewall targetTag {tag}",
             "observed_tags": sorted(other_tags),
         }
-        result["tests"]["cleanup"] = {"passed": True}
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
-        # Ordering: instances → firewall → subnet → network.
+        # Ordering: instances → firewall → subnet → network. Collect
+        # per-resource errors into `cleanup_errors` so `cleanup.passed`
+        # can gate on real outcomes (AWS oracle parity — silently-leaked
+        # resources must NOT read as cleanup success).
         priority = {"instance": 0, "firewall": 1, "subnet": 2, "network": 3}
         for kind, n in sorted(cleanup, key=lambda kv: priority.get(kv[0], 99)):
             try:
                 if kind == "instance":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_zonal_op(
                             project,
                             zone,
@@ -247,7 +249,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         resource_desc=f"instance {n}",
                     )
                 elif kind == "firewall":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             firewalls.delete(project=project, firewall=nn).name,
@@ -256,7 +258,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         resource_desc=f"firewall {n}",
                     )
                 elif kind == "subnet":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_region_op(
                             project,
                             region,
@@ -266,7 +268,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         resource_desc=f"subnet {n}",
                     )
                 else:
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             networks.delete(project=project, network=nn).name,
@@ -274,8 +276,16 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         ),
                         resource_desc=f"network {n}",
                     )
-            except Exception:
-                pass
+                if not ok:
+                    cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+            except Exception as e:
+                cleanup_errors.append(f"{kind} {n}: {e}")
+    result["tests"]["cleanup"] = {
+        "passed": not cleanup_errors,
+        "errors": cleanup_errors,
+    }
+    # success requires every subtest including cleanup to be passed.
+    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     return result
 
 
@@ -291,6 +301,7 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
     cidr_b = "10.50.1.0/24"
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     try:
         _insert_network(project, network, cleanup=cleanup)
         _insert_subnet(project, region, network, sub_a, cidr_a, cleanup=cleanup)
@@ -324,40 +335,51 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
             "passed": cidr_b not in ranges,
             "message": f"firewall sourceRanges do not contain subnet B CIDR ({cidr_b})",
         }
-        result["tests"]["cleanup"] = {"passed": True}
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
+        # Per-resource cleanup error tally — `cleanup.passed` gates on this
+        # (AWS oracle parity: silently-leaked resources MUST NOT read as
+        # cleanup success).
         for kind, n in reversed(cleanup):
-            if kind == "firewall":
-                delete_with_retry(
-                    lambda nn=n: wait_for_global_op(
-                        project,
-                        firewalls.delete(project=project, firewall=nn).name,
-                        timeout=120,
-                    ),
-                    resource_desc=f"firewall {n}",
-                )
-            elif kind == "subnet":
-                delete_with_retry(
-                    lambda nn=n: wait_for_region_op(
-                        project,
-                        region,
-                        subnets_c.delete(project=project, region=region, subnetwork=nn).name,
-                        timeout=180,
-                    ),
-                    resource_desc=f"subnet {n}",
-                )
-            else:
-                delete_with_retry(
-                    lambda nn=n: wait_for_global_op(
-                        project,
-                        networks.delete(project=project, network=nn).name,
-                        timeout=180,
-                    ),
-                    resource_desc=f"network {n}",
-                )
+            try:
+                if kind == "firewall":
+                    ok = delete_with_retry(
+                        lambda nn=n: wait_for_global_op(
+                            project,
+                            firewalls.delete(project=project, firewall=nn).name,
+                            timeout=120,
+                        ),
+                        resource_desc=f"firewall {n}",
+                    )
+                elif kind == "subnet":
+                    ok = delete_with_retry(
+                        lambda nn=n: wait_for_region_op(
+                            project,
+                            region,
+                            subnets_c.delete(project=project, region=region, subnetwork=nn).name,
+                            timeout=180,
+                        ),
+                        resource_desc=f"subnet {n}",
+                    )
+                else:
+                    ok = delete_with_retry(
+                        lambda nn=n: wait_for_global_op(
+                            project,
+                            networks.delete(project=project, network=nn).name,
+                            timeout=180,
+                        ),
+                        resource_desc=f"network {n}",
+                    )
+                if not ok:
+                    cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+            except Exception as e:
+                cleanup_errors.append(f"{kind} {n}: {e}")
+    result["tests"]["cleanup"] = {
+        "passed": not cleanup_errors,
+        "errors": cleanup_errors,
+    }
+    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     return result
 
 
@@ -446,6 +468,7 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
         "tests": {},
     }
     cleanup: list[tuple[str, str]] = []  # (kind, name)
+    cleanup_errors: list[str] = []
     sa_email: str | None = None
     session = None
     try:
@@ -608,8 +631,6 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
             "vm": name_other,
             "service_accounts": o_sa_emails,
         }
-        result["tests"]["cleanup"] = {"passed": True}
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"] = "api_error" if isinstance(e, gax.GoogleAPICallError) else "unknown_error"
         result["error"] = str(e)
@@ -626,12 +647,15 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
         )
     finally:
         # Cleanup ordering: VMs first (release SA), then firewall, subnet,
-        # network, then SA last (eventually-consistent — log but don't block).
+        # network, then SA last (eventually-consistent — log error but do
+        # not block on the SA-delete REST race). Per-resource errors
+        # collected into cleanup_errors so `cleanup.passed` gates honestly
+        # (AWS oracle parity).
         priority = {"instance": 0, "firewall": 1, "subnet": 2, "network": 3, "sa": 4}
         for kind, n in sorted(cleanup, key=lambda kv: priority.get(kv[0], 99)):
             try:
                 if kind == "instance":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_zonal_op(
                             project,
                             zone,
@@ -640,8 +664,10 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         ),
                         resource_desc=f"instance {n}",
                     )
+                    if not ok:
+                        cleanup_errors.append(f"instance {n}: delete_with_retry returned False")
                 elif kind == "firewall":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             firewalls_c.delete(project=project, firewall=nn).name,
@@ -649,8 +675,10 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         ),
                         resource_desc=f"firewall {n}",
                     )
+                    if not ok:
+                        cleanup_errors.append(f"firewall {n}: delete_with_retry returned False")
                 elif kind == "subnet":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_region_op(
                             project,
                             region,
@@ -659,17 +687,21 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         ),
                         resource_desc=f"subnet {n}",
                     )
+                    if not ok:
+                        cleanup_errors.append(f"subnet {n}: delete_with_retry returned False")
                 elif kind == "sa":
+                    # SA delete is eventually-consistent; surface failure in
+                    # cleanup_errors but do not require it to pass.
                     if session is not None:
                         try:
                             session.delete(
                                 f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{n}",
                                 timeout=30,
                             )
-                        except Exception:
-                            pass
+                        except Exception as e:
+                            cleanup_errors.append(f"sa {n}: {e}")
                 else:
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             networks_c.delete(project=project, network=nn).name,
@@ -677,8 +709,18 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         ),
                         resource_desc=f"network {n}",
                     )
-            except Exception:
-                pass
+                    if not ok:
+                        cleanup_errors.append(f"network {n}: delete_with_retry returned False")
+            except Exception as e:
+                cleanup_errors.append(f"{kind} {n}: {e}")
+    # SA-delete errors recorded but excluded from the cleanup.passed gate
+    # (eventually-consistent — caller MUST not block teardown on it).
+    blocking_errors = [e for e in cleanup_errors if not e.startswith("sa ")]
+    result["tests"]["cleanup"] = {
+        "passed": not blocking_errors,
+        "errors": cleanup_errors,
+    }
+    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     return result
 
 
