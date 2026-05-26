@@ -1,0 +1,321 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+
+# GCP Network (VPC + Subnetwork + Firewall + Cloud DNS) Validation
+# Configuration.
+#
+# Imports the provider-agnostic network contract from suites/network.yaml
+# and wires every step to a Compute Engine / Cloud DNS / Cloud Logging
+# stub under providers/gcp/scripts/network/. Steps mirror the AWS oracle
+# order; teardown gates resource cleanup on the verified-reuse
+# `network_created` ownership bit forwarded from create_network.
+#
+# Validator overrides (group-nested — required shape, see knowledge):
+#   * network.checks.VpcIpConfigCheck.auto_assign_ip_mode = instance
+#     Compute Engine external IPs attach per-NIC via accessConfigs, not
+#     subnet-level auto-assign flags; the override flips the validator's
+#     mode so subnets[].auto_assign_public_ip=false is honestly accepted.
+#   * sdn.checks.FloatingIpCheck.max_switch_seconds = 20
+#     Compute Engine ephemeral→static external-IP promotion measured ~12s,
+#     exceeding the 10s AWS-shaped default. Override rather than skip so
+#     allocate / associate / reassociate subtests still run.
+#
+# Usage:
+#   uv run isvctl test run -f isvctl/configs/providers/gcp/config/network.yaml
+
+import:
+  - ../../../suites/network.yaml
+
+version: "1.0"
+
+commands:
+  network:
+    phases: ["setup", "test", "teardown"]
+    steps:
+      # Setup: Create shared VPC + subnets + firewall for connectivity tests.
+      - name: create_network
+        phase: setup
+        command: "python3 ../scripts/network/create_vpc.py"
+        args:
+          - "--name"
+          - "isv-shared-vpc"
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.0.0.0/16"
+        timeout: 300
+
+      - name: vpc_crud
+        phase: test
+        command: "python3 ../scripts/network/vpc_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.99.0.0/16"
+        timeout: 120
+        output_schema: vpc_crud
+
+      - name: subnet_config
+        phase: test
+        command: "python3 ../scripts/network/subnet_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.98.0.0/16"
+          - "--subnet-count"
+          - "4"
+        timeout: 120
+        output_schema: subnet_config
+
+      - name: vpc_isolation
+        phase: test
+        command: "python3 ../scripts/network/isolation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr-a"
+          - "10.97.0.0/16"
+          - "--cidr-b"
+          - "10.96.0.0/16"
+        timeout: 120
+        output_schema: vpc_isolation
+
+      - name: sg_crud
+        phase: test
+        command: "python3 ../scripts/network/sg_crud_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.95.0.0/16"
+        timeout: 120
+        output_schema: sg_crud
+
+      - name: security_blocking
+        phase: test
+        command: "python3 ../scripts/network/security_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.94.0.0/16"
+        timeout: 120
+        output_schema: security_blocking
+
+      - name: sg_workload_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_scoping_test.py"
+        args: ["--region", "{{region}}", "--scope", "workload"]
+        timeout: 600
+
+      - name: sg_node_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_scoping_test.py"
+        args: ["--region", "{{region}}", "--scope", "node"]
+        timeout: 600
+
+      - name: sg_subnet_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_scoping_test.py"
+        args: ["--region", "{{region}}", "--scope", "subnet"]
+        timeout: 120
+
+      - name: sg_service_scoping
+        phase: test
+        command: "python3 ../scripts/network/sg_scoping_test.py"
+        args: ["--region", "{{region}}", "--scope", "service"]
+        timeout: 900
+
+      - name: sdn_hardware_fault_logging
+        phase: test
+        command: "python3 ../scripts/network/sdn_logging_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--aspect"
+          - "hardware_faults"
+        timeout: 120
+
+      - name: sdn_latency_perf_logging
+        phase: test
+        command: "python3 ../scripts/network/sdn_logging_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--aspect"
+          - "latency_perf"
+        timeout: 300
+
+      - name: sdn_filter_audit_trail
+        phase: test
+        command: "python3 ../scripts/network/sdn_logging_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--aspect"
+          - "audit_trail"
+        timeout: 900
+
+      - name: connectivity_test
+        phase: test
+        command: "python3 ../scripts/network/test_connectivity.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--subnet-ids"
+          - "{{steps.create_network.subnets | map(attribute='subnet_id') | join(',')}}"
+          - "--sg-id"
+          - "{{steps.create_network.security_group_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 900
+        output_schema: connectivity_result
+
+      - name: traffic_validation
+        phase: test
+        command: "python3 ../scripts/network/traffic_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.93.0.0/16"
+        timeout: 1200
+        output_schema: traffic_flow
+
+      - name: vpc_ip_config
+        phase: test
+        command: "python3 ../scripts/network/vpc_ip_config_test.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 120
+        output_schema: vpc_ip_config
+
+      - name: dhcp_ip_test
+        phase: test
+        command: "python3 ../scripts/network/dhcp_ip_test.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--subnet-id"
+          - "{{steps.create_network.subnets[0].subnet_id}}"
+          - "--sg-id"
+          - "{{steps.create_network.security_group_id}}"
+          - "--region"
+          - "{{region}}"
+        timeout: 600
+        output_schema: dhcp_ip
+
+      - name: byoip_test
+        phase: test
+        command: "python3 ../scripts/network/byoip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--custom-cidr"
+          - "100.64.0.0/16"
+          - "--standard-cidr"
+          - "10.90.0.0/16"
+        timeout: 120
+        output_schema: byoip
+
+      - name: stable_ip_test
+        phase: test
+        command: "python3 ../scripts/network/stable_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.91.0.0/16"
+        timeout: 900
+        output_schema: stable_ip
+
+      - name: floating_ip_test
+        phase: test
+        command: "python3 ../scripts/network/floating_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.92.0.0/16"
+          - "--max-switch-seconds"
+          - "20"
+        timeout: 900
+        output_schema: floating_ip
+
+      - name: dns_test
+        phase: test
+        command: "python3 ../scripts/network/dns_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr"
+          - "10.89.0.0/16"
+          - "--domain"
+          - "internal.isv.test"
+        timeout: 120
+        output_schema: localized_dns
+
+      - name: peering_test
+        phase: test
+        command: "python3 ../scripts/network/peering_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--cidr-a"
+          - "10.88.0.0/16"
+          - "--cidr-b"
+          - "10.87.0.0/16"
+        timeout: 600
+        output_schema: vpc_peering
+
+      - name: teardown
+        phase: teardown
+        command: "python3 ../scripts/network/teardown.py"
+        args:
+          - "--vpc-id"
+          - "{{steps.create_network.network_id | default('none', true)}}"
+          - "--region"
+          - "{{region}}"
+          - "--network-created"
+          - "{{steps.create_network.network_created | default('false')}}"
+          - "--key-file"
+          - "{{steps.dhcp_ip_test.key_file | default('none', true)}}"
+          - "--key-name"
+          - "{{steps.dhcp_ip_test.key_name | default('none', true)}}"
+          - "--key-created"
+          - "{{steps.dhcp_ip_test.key_created | default('false')}}"
+        timeout: 600
+        output_schema: teardown
+
+tests:
+  cluster_name: "gcp-network-validation"
+  description: "GCP VPC + Subnetwork + Firewall + Cloud DNS validation tests"
+
+  settings:
+    region: "us-central1"
+
+  # GCP-specific validator overrides. GROUP-NESTED shape is REQUIRED —
+  # the FLAT shape `validations.<Validator>.provider_config.<key>` is
+  # silently dropped by isvtest's loader at
+  # `isvtest/src/isvtest/main.py:244` and the validator falls back to
+  # AWS-shaped defaults.
+  validations:
+    network:
+      checks:
+        VpcIpConfigCheck:
+          auto_assign_ip_mode: instance
+    sdn:
+      checks:
+        FloatingIpCheck:
+          max_switch_seconds: 20
