@@ -106,14 +106,45 @@ def main() -> int:
         )
         # Setup network. Stamp the tracker BEFORE the wait so a wait failure
         # still surfaces the partial-create graph to the cleanup finally.
-        op = networks.insert(
-            project=project,
-            network_resource=compute_v1.Network(
-                name=network_name,
-                description=ISV_DESCRIPTION,
-                auto_create_subnetworks=False,
-            ),
-        )
+        # Compute Engine resource names are scoped to (project, RUN_ID[:8])
+        # via unique_suffix; a prior killed run in the same RUN_ID can leave
+        # an orphan network behind. Verified-reuse it via the ISV
+        # description marker so the same RUN_ID can recover its own
+        # leftovers; refuse to adopt a name owned by something else.
+        try:
+            op = networks.insert(
+                project=project,
+                network_resource=compute_v1.Network(
+                    name=network_name,
+                    description=ISV_DESCRIPTION,
+                    auto_create_subnetworks=False,
+                ),
+            )
+        except gax.Conflict:
+            existing = networks.get(project=project, network=network_name)
+            if (existing.description or "") != ISV_DESCRIPTION:
+                raise RuntimeError(
+                    f"network {network_name!r} exists in {project} without ISV ownership marker; refusing to adopt"
+                ) from None
+            for selflink in existing.subnetworks or ():
+                parts = selflink.split("/")
+                sub_region = parts[parts.index("regions") + 1] if "regions" in parts else args.region
+                sub_name = parts[-1]
+                try:
+                    sub_op = subnets_client.delete(project=project, region=sub_region, subnetwork=sub_name)
+                    wait_for_region_op(project, sub_region, sub_op.name, timeout=180)
+                except gax.NotFound:
+                    pass
+            del_op = networks.delete(project=project, network=network_name)
+            wait_for_global_op(project, del_op.name, timeout=180)
+            op = networks.insert(
+                project=project,
+                network_resource=compute_v1.Network(
+                    name=network_name,
+                    description=ISV_DESCRIPTION,
+                    auto_create_subnetworks=False,
+                ),
+            )
         network_created = True
         wait_for_global_op(project, op.name, timeout=300)
         result["tests"]["create_vpc"] = {"passed": True, "vpc_id": network_name}

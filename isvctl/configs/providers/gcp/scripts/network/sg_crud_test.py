@@ -36,14 +36,43 @@ ISV_DESCRIPTION = "isvtest sg_crud — verified-reuse marker"
 
 
 def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
-    op = compute_v1.NetworksClient().insert(
-        project=project,
-        network_resource=compute_v1.Network(
+    """Insert a network and wait. A 409 here means a prior killed run in
+    the same RUN_ID left an orphan ``isv-sgcrud-*`` network behind whose
+    teardown didn't complete. Verified-reuse it via the ISV description
+    marker so the same RUN_ID can recover from its own leftovers; refuse
+    to adopt a name we did not stamp."""
+    networks = compute_v1.NetworksClient()
+    firewalls = compute_v1.FirewallsClient()
+
+    def _build() -> compute_v1.Network:
+        return compute_v1.Network(
             name=name,
             description=ISV_DESCRIPTION,
             auto_create_subnetworks=False,
-        ),
-    )
+        )
+
+    try:
+        op = networks.insert(project=project, network_resource=_build())
+    except gax.Conflict:
+        existing = networks.get(project=project, network=name)
+        if (existing.description or "") != ISV_DESCRIPTION:
+            raise RuntimeError(
+                f"network {name!r} exists in {project} without ISV ownership marker; refusing to adopt"
+            ) from None
+        # Remove orphan firewalls scoped to this network — Compute Engine
+        # rejects network.delete while firewalls still reference it.
+        network_self = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{name}"
+        for fw in firewalls.list(
+            request=compute_v1.ListFirewallsRequest(project=project, filter=f'network="{network_self}"'),
+        ):
+            try:
+                fop = firewalls.delete(project=project, firewall=fw.name)
+                wait_for_global_op(project, fop.name, timeout=120)
+            except gax.NotFound:
+                pass
+        del_op = networks.delete(project=project, network=name)
+        wait_for_global_op(project, del_op.name, timeout=300)
+        op = networks.insert(project=project, network_resource=_build())
     cleanup.append(("network", name))
     wait_for_global_op(project, op.name, timeout=300)
 
@@ -56,17 +85,35 @@ def _insert_firewall(
     *,
     cleanup: list[tuple[str, str]],
 ) -> None:
-    op = compute_v1.FirewallsClient().insert(
-        project=project,
-        firewall_resource=compute_v1.Firewall(
+    """Insert a firewall and wait. Same orphan-adopt + recreate pattern as
+    ``_insert_network`` so an ``isv-fwm-*`` / ``isv-fwa-*`` leftover from
+    a prior killed run doesn't immediately fail the new attempt."""
+    firewalls = compute_v1.FirewallsClient()
+
+    def _build() -> compute_v1.Firewall:
+        return compute_v1.Firewall(
             name=name,
             description=ISV_DESCRIPTION,
             network=f"projects/{project}/global/networks/{network}",
             direction="INGRESS",
             source_ranges=["0.0.0.0/0"],
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=[port])],
-        ),
-    )
+        )
+
+    try:
+        op = firewalls.insert(project=project, firewall_resource=_build())
+    except gax.Conflict:
+        existing = firewalls.get(project=project, firewall=name)
+        if (existing.description or "") != ISV_DESCRIPTION:
+            raise RuntimeError(
+                f"firewall {name!r} exists in {project} without ISV ownership marker; refusing to adopt"
+            ) from None
+        try:
+            del_op = firewalls.delete(project=project, firewall=name)
+            wait_for_global_op(project, del_op.name, timeout=180)
+        except gax.NotFound:
+            pass
+        op = firewalls.insert(project=project, firewall_resource=_build())
     cleanup.append(("firewall", name))
     wait_for_global_op(project, op.name, timeout=180)
 

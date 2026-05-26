@@ -37,6 +37,42 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest vpc_crud — verified-reuse marker"
 
 
+def _is_not_ready(err: Exception) -> bool:
+    """Return True iff ``err`` matches GCE's post-insert 'is not ready' 400.
+
+    Even after networks.insert's global op reaches DONE, mutation calls
+    (add_peering, patch) can return ``400 ... is not ready`` for several
+    seconds while the resource finishes propagating server-side.
+    """
+    msg = str(err)
+    return isinstance(err, gax.BadRequest) and "is not ready" in msg
+
+
+def _with_readiness_retry(
+    op_fn: Callable[[], Any],
+    *,
+    attempts: int = 12,
+    backoff: float = 5.0,
+) -> Any:
+    """Run ``op_fn`` and retry on GCE post-insert 'is not ready' BadRequest.
+
+    Used for mutations (add_peering / patch) issued immediately after
+    networks.insert, where op-DONE precedes mutation-readiness.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return op_fn()
+        except gax.BadRequest as e:
+            if not _is_not_ready(e) or attempt >= attempts:
+                raise
+            print(
+                f"  network not yet ready ({type(e).__name__}); attempt {attempt}/{attempts}, sleeping {backoff}s",
+                file=sys.stderr,
+            )
+            time.sleep(backoff)
+    raise RuntimeError("unreachable")
+
+
 def _insert_network(
     project: str,
     name: str,
@@ -46,20 +82,79 @@ def _insert_network(
 ) -> None:
     """Insert a network and wait. The optional ``on_dispatch`` callback fires
     after ``insert()`` returns but BEFORE the wait — callers use it to stamp
-    a cleanup tracker so the partial-create graph survives a wait failure."""
+    a cleanup tracker so the partial-create graph survives a wait failure.
+
+    A 409 ``AlreadyExists`` here means a prior killed run in the same
+    RUN_ID left an orphan ``isv-crud-*`` network behind whose teardown
+    didn't complete (e.g. blocked on the post-insert "is not ready"
+    window). Verified-reuse it via the ISV description marker so the
+    same RUN_ID can recover from its own leftovers; refuse to adopt a
+    name we did not stamp.
+    """
     networks = compute_v1.NetworksClient()
-    op = networks.insert(
-        project=project,
-        network_resource=compute_v1.Network(
+
+    def _build_resource() -> compute_v1.Network:
+        return compute_v1.Network(
             name=name,
             description=ISV_DESCRIPTION,
             auto_create_subnetworks=False,
             routing_config=compute_v1.NetworkRoutingConfig(routing_mode=routing),
-        ),
-    )
-    if on_dispatch is not None:
-        on_dispatch()
-    wait_for_global_op(project, op.name, timeout=300)
+        )
+
+    def _adopt_and_remove_orphan() -> None:
+        existing = networks.get(project=project, network=name)
+        if (existing.description or "") != ISV_DESCRIPTION:
+            raise RuntimeError(f"network {name!r} exists in {project} without ISV ownership marker; refusing to adopt")
+        # Compute Engine rejects network.delete while peerings exist.
+        for p in existing.peerings or ():
+            try:
+                rop = networks.remove_peering(
+                    project=project,
+                    network=name,
+                    networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=p.name),
+                )
+                wait_for_global_op(project, rop.name, timeout=120)
+            except (gax.NotFound, gax.BadRequest):
+                pass
+        try:
+            del_op = _with_readiness_retry(lambda: networks.delete(project=project, network=name))
+            wait_for_global_op(project, del_op.name, timeout=300)
+        except gax.NotFound:
+            pass
+
+    # The insert+wait sequence is retried because GCP occasionally returns
+    # an op DONE with OPERATION_CANCELED_BY_USER when a previous in-flight
+    # insert on the same network name was killed (e.g. by a step timeout)
+    # and its server-side resource state collides with the new attempt.
+    last_err: Exception | None = None
+    for attempt in range(1, 4):
+        try:
+            op = networks.insert(project=project, network_resource=_build_resource())
+        except gax.Conflict:
+            _adopt_and_remove_orphan()
+            time.sleep(5)
+            op = networks.insert(project=project, network_resource=_build_resource())
+        if on_dispatch is not None and attempt == 1:
+            on_dispatch()
+        try:
+            wait_for_global_op(project, op.name, timeout=300)
+            return
+        except RuntimeError as e:
+            last_err = e
+            if "OPERATION_CANCELED" not in str(e) or attempt >= 3:
+                raise
+            print(
+                f"  insert op CANCELED on attempt {attempt}/3; cleaning up and retrying",
+                file=sys.stderr,
+            )
+            # The cancellation may have left a partial-create record
+            # behind; sweep it before the next attempt.
+            try:
+                _adopt_and_remove_orphan()
+            except (gax.NotFound, RuntimeError):
+                pass
+            time.sleep(15)
+    raise RuntimeError(f"network insert failed after retries: {last_err}")
 
 
 def test_create_vpc(project: str, name: str, tracker: dict[str, bool]) -> dict[str, Any]:
@@ -133,16 +228,18 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
             peer_name,
             on_dispatch=lambda: peer_tracker.__setitem__("created", True),
         )
-        op = networks.add_peering(
-            project=project,
-            network=name,
-            networks_add_peering_request_resource=compute_v1.NetworksAddPeeringRequest(
-                network_peering=compute_v1.NetworkPeering(
-                    name=peering_name,
-                    network=f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{peer_name}",
-                    exchange_subnet_routes=True,
+        op = _with_readiness_retry(
+            lambda: networks.add_peering(
+                project=project,
+                network=name,
+                networks_add_peering_request_resource=compute_v1.NetworksAddPeeringRequest(
+                    network_peering=compute_v1.NetworkPeering(
+                        name=peering_name,
+                        network=f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{peer_name}",
+                        exchange_subnet_routes=True,
+                    ),
                 ),
-            ),
+            )
         )
         wait_for_global_op(project, op.name, timeout=180)
         net = networks.get(project=project, network=name)
@@ -182,12 +279,14 @@ def test_update_dns(project: str, name: str) -> dict[str, Any]:
         net = networks.get(project=project, network=name)
         before = net.routing_config.routing_mode if net.routing_config else "REGIONAL"
         target = "GLOBAL" if before == "REGIONAL" else "REGIONAL"
-        op = networks.patch(
-            project=project,
-            network=name,
-            network_resource=compute_v1.Network(
-                routing_config=compute_v1.NetworkRoutingConfig(routing_mode=target),
-            ),
+        op = _with_readiness_retry(
+            lambda: networks.patch(
+                project=project,
+                network=name,
+                network_resource=compute_v1.Network(
+                    routing_config=compute_v1.NetworkRoutingConfig(routing_mode=target),
+                ),
+            )
         )
         wait_for_global_op(project, op.name, timeout=180)
         net2 = networks.get(project=project, network=name)
@@ -208,7 +307,9 @@ def test_delete_vpc(project: str, name: str) -> dict[str, Any]:
     result: dict[str, Any] = {"passed": False}
     networks = compute_v1.NetworksClient()
     try:
-        op = networks.delete(project=project, network=name)
+        # networks.delete also hits the post-mutation "is not ready" 400
+        # window — retry until the resource is ready or the budget is gone.
+        op = _with_readiness_retry(lambda: networks.delete(project=project, network=name))
         wait_for_global_op(project, op.name, timeout=300)
         time.sleep(1)
         try:
@@ -284,7 +385,7 @@ def main() -> int:
             delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
-                    networks.delete(project=project, network=name).name,
+                    _with_readiness_retry(lambda: networks.delete(project=project, network=name)).name,
                     timeout=180,
                 ),
                 resource_desc=f"network {name}",
