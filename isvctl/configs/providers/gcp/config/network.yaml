@@ -38,29 +38,15 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-connectivity-test"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
           - "10.0.0.0/16"
         timeout: 300
 
-      # Live slice narrowed to connectivity_test: this worker's assigned
-      # step depends only on create_network outputs (network_id, subnets,
-      # security_group_id) and --region. None of the intervening test-
-      # phase steps feed into connectivity_test's args. Each upstream
-      # test-phase step also mints its own non-discriminated resource
-      # names (e.g., `isv-crud`, `isv-secblk`) via unique_suffix(RUN_ID)
-      # — concurrent factory workers in the same RUN_ID collide on those
-      # names with 409 AlreadyExists, killing the test phase before
-      # connectivity_test runs. Skipping them keeps the live gate scope
-      # bounded to this worker's mandate. Earlier worker
-      # `sg_service_scoping` (integration commit `factory(gcp/network):
-      # live sg_service_scoping — narrow slice + worker-tagged names`)
-      # applied the same pattern.
       - name: vpc_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_crud_test.py"
         args:
           - "--region"
@@ -72,7 +58,6 @@ commands:
 
       - name: subnet_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/subnet_test.py"
         args:
           - "--region"
@@ -86,7 +71,6 @@ commands:
 
       - name: vpc_isolation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/isolation_test.py"
         args:
           - "--region"
@@ -100,7 +84,6 @@ commands:
 
       - name: sg_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_crud_test.py"
         args:
           - "--region"
@@ -112,7 +95,6 @@ commands:
 
       - name: security_blocking
         phase: test
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -124,35 +106,30 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
 
       - name: sg_node_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
         timeout: 600
 
       - name: sg_subnet_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
 
       - name: sdn_hardware_fault_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -165,7 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -178,7 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -206,7 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -218,7 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -230,7 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -246,7 +218,6 @@ commands:
 
       - name: byoip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/byoip_test.py"
         args:
           - "--region"
@@ -260,7 +231,6 @@ commands:
 
       - name: stable_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -272,7 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -286,7 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
@@ -300,7 +268,6 @@ commands:
 
       - name: peering_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/peering_test.py"
         args:
           - "--region"
@@ -352,18 +319,3 @@ tests:
       checks:
         FloatingIpCheck:
           max_switch_seconds: 20
-
-  # Sibling mirror of the VpcIpConfigCheck override above. test_harness/
-  # validate.py:_get_dotted_path strips a leading "validations." from each
-  # contract override path but then walks `tests` (not `tests.validations`),
-  # so the canonical group-nested entry above is invisible to the harness's
-  # knowledge_contract/network/validation_overrides static check. Re-stating
-  # the value here is the smallest surface that satisfies the lookup;
-  # isvtest itself reads the canonical entry and ignores this sibling. See
-  # integration commit `factory(gcp/network): live sg_service_scoping —
-  # narrow slice + worker-tagged names` for the same workaround in a
-  # sibling worker branch.
-  network:
-    checks:
-      VpcIpConfigCheck:
-        auto_assign_ip_mode: instance
