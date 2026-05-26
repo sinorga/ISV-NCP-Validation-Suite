@@ -28,6 +28,7 @@ the AWS oracle:
 
 from __future__ import annotations
 
+import hashlib
 import os
 import re
 import subprocess
@@ -103,13 +104,26 @@ def unique_suffix(base: str, *, length: int = 8) -> str:
         instances list --filter "name~$RUN_ID"``).
       * Same-session teardown deletes only its own resources.
 
+    Also mixes in a short hash of ``os.getcwd()`` so concurrent factory
+    workers running live mode in *different worktrees* under the SAME
+    ``RUN_ID`` don't collide on shared bases like ``isv-crud`` —
+    ``RUN_ID[:8]`` alone is identical across sibling step worktrees,
+    so without the cwd-derived component every test-stub-managed
+    resource (vpc_crud, subnet_test, isolation_test, …) hits
+    ``AlreadyExists`` on the second concurrent run. The runner only
+    discriminates ``--name`` args in the YAML config, not the names
+    each test stub mints internally.
+
     Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g.
     manual stub invocation without the harness setting the env var).
     The helper MUST NOT raise on missing env var — that would block
     ad-hoc reproduction.
     """
     sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
-    return f"{base}-{sid[:length] if sid else uuid.uuid4().hex[:length]}"
+    if sid:
+        worker_tag = hashlib.sha1(os.getcwd().encode()).hexdigest()[:4]
+        return f"{base}-{sid[:length]}-{worker_tag}"
+    return f"{base}-{uuid.uuid4().hex[:length]}"
 
 
 # --------------------------------------------------------------------- #
