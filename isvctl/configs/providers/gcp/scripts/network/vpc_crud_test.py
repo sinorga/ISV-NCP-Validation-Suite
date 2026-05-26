@@ -223,7 +223,7 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    name = unique_suffix("isv-crud")
+    name = unique_suffix("isv-crud-iso")
 
     result: dict[str, Any] = {
         "success": False,
