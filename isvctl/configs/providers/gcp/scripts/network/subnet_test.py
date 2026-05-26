@@ -183,12 +183,14 @@ def main() -> int:
             "count": len(subnets_emitted),
             "subnets": subnets_emitted,
         }
-        # SubnetConfigCheck reads ``step_output["subnets"]`` at top
+        # SubnetConfigCheck reads ``step_output["subnets"]`` at the TOP
         # level for the subnet-count and multi-AZ assertions (validator
-        # at isvtest/.../network.py:124) — the nested
-        # ``tests.create_subnets.subnets`` is the per-subtest record but
-        # is not what the validator inspects. Surface the same list at
-        # the contract path so the validator sees it.
+        # at isvtest/src/isvtest/validations/network.py SubnetConfigCheck.run,
+        # ~line 124). The nested ``tests.create_subnets.subnets`` is the
+        # per-subtest record but is not what the validator inspects. The
+        # AWS oracle emits both ``tests.create_subnets.subnets`` and the
+        # top-level ``subnets``; mirror that here so the validator sees
+        # the full subnet inventory.
         result["subnets"] = subnets_emitted
 
         # az_distribution
