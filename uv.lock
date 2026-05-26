@@ -601,6 +601,18 @@ wheels = [
 ]
 
 [[package]]
+name = "google-cloud-dns"
+version = "0.37.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "google-cloud-core" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9c/0c/0b272c5f33be66b91173149ba90804efb5ed1d59d3bf84f91da05d81a566/google_cloud_dns-0.37.0.tar.gz", hash = "sha256:3095ced0d46d106ac46b582f68fb73c9508766f821b6d134839e25c01b2921ac", size = 23119, upload-time = "2026-05-07T08:04:11.089Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d3/c8/bb3585c68bb8f324d9fd42ef31fb85802012d38418ba5db55508fc71489e/google_cloud_dns-0.37.0-py3-none-any.whl", hash = "sha256:093d782d23c3acd7c499519ad7772fc04dc9e0c31b6dd2d6a44d661af03d9e1f", size = 18664, upload-time = "2026-05-07T08:02:43.344Z" },
+]
+
+[[package]]
 name = "google-cloud-logging"
 version = "3.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -796,6 +808,7 @@ version = "0.7.0"
 source = { editable = "isvctl" }
 dependencies = [
     { name = "google-cloud-compute" },
+    { name = "google-cloud-dns" },
     { name = "google-cloud-logging" },
     { name = "isvreporter" },
     { name = "isvtest" },
@@ -808,6 +821,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "google-cloud-compute", specifier = ">=1.30.0,<2.0.0" },
+    { name = "google-cloud-dns", specifier = ">=0.35.0,<1.0.0" },
     { name = "google-cloud-logging", specifier = ">=3.10.0,<4.0.0" },
     { name = "isvreporter", editable = "isvreporter" },
     { name = "isvtest", editable = "isvtest" },
