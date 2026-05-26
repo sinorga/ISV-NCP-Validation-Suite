@@ -38,26 +38,15 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-sg-node-scoping"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
           - "10.0.0.0/16"
         timeout: 300
 
-      # vpc_crud, subnet_config, vpc_isolation, sg_crud, security_blocking,
-      # and sg_workload_scoping are skipped here because sg_scoping_test.py
-      # (this worker's target) creates its OWN network/subnet/firewall and
-      # references NO step output from those upstream tests — see
-      # `_scope_workload` in sg_scoping_test.py and the step's `args` (no
-      # `{{steps.X.Y}}` references). Skipping unrelated test steps keeps
-      # the sg_node_scoping live slice tight (create_network → sg_node_scoping
-      # → teardown) and avoids inheriting upstream-step bug-shapes (e.g.
-      # vpc_crud 120s timeout clip, subnet_config RUN_ID name collisions)
-      # that other workers fix on their own branches.
       - name: vpc_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_crud_test.py"
         args:
           - "--region"
@@ -69,7 +58,6 @@ commands:
 
       - name: subnet_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/subnet_test.py"
         args:
           - "--region"
@@ -83,7 +71,6 @@ commands:
 
       - name: vpc_isolation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/isolation_test.py"
         args:
           - "--region"
@@ -97,7 +84,6 @@ commands:
 
       - name: sg_crud
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_crud_test.py"
         args:
           - "--region"
@@ -109,7 +95,6 @@ commands:
 
       - name: security_blocking
         phase: test
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -121,7 +106,6 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
@@ -134,21 +118,18 @@ commands:
 
       - name: sg_subnet_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
 
       - name: sdn_hardware_fault_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -161,7 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -174,7 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -187,7 +166,6 @@ commands:
 
       - name: connectivity_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -203,7 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -215,7 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -227,7 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -243,7 +218,6 @@ commands:
 
       - name: byoip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/byoip_test.py"
         args:
           - "--region"
@@ -257,7 +231,6 @@ commands:
 
       - name: stable_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -269,7 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -283,7 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
@@ -297,7 +268,6 @@ commands:
 
       - name: peering_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/peering_test.py"
         args:
           - "--region"
@@ -349,24 +319,3 @@ tests:
       checks:
         FloatingIpCheck:
           max_switch_seconds: 20
-
-  # FACTORY-HARNESS-BUG witness — DO NOT remove until the harness
-  # validation-overrides check is fixed.
-  #
-  # The harness `_check_knowledge_validation_overrides` /
-  # `_get_dotted_path` (`test_harness/validate.py:1240-1281`) splits the
-  # knowledge override path
-  # `validations.network.checks.VpcIpConfigCheck.auto_assign_ip_mode`,
-  # strips the leading `validations.` segment, then traverses from
-  # `resolved_config["tests"]` — so it expects the override at
-  # `tests.network.checks.<Validator>.<key>`, not at the GROUP-NESTED
-  # runtime location above. Without this duplicate, the static gate
-  # reports `validation override mismatch ... expected instance got
-  # <missing>` even though isvtest's actual validator runs with the
-  # override applied. Once the harness path resolution is fixed (either
-  # traverse from `tests.validations` or drop the strip) this block can
-  # be deleted.
-  network:
-    checks:
-      VpcIpConfigCheck:
-        auto_assign_ip_mode: instance
