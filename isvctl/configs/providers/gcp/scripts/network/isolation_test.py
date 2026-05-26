@@ -34,7 +34,10 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest vpc_isolation — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str) -> None:
+def _insert_network(project: str, name: str, *, cleanup: list[str]) -> None:
+    """Insert a network and wait. Stamps the cleanup tracker BEFORE the wait
+    so a wait failure still leaves the partial-create visible to the caller's
+    cleanup loop."""
     op = compute_v1.NetworksClient().insert(
         project=project,
         network_resource=compute_v1.Network(
@@ -43,6 +46,7 @@ def _insert_network(project: str, name: str) -> None:
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(name)
     wait_for_global_op(project, op.name, timeout=300)
 
 
@@ -79,11 +83,9 @@ def main() -> int:
     created: list[str] = []
 
     try:
-        _insert_network(project, name_a)
-        created.append(name_a)
+        _insert_network(project, name_a, cleanup=created)
         result["tests"]["create_vpc_a"] = {"passed": True, "vpc_id": name_a}
-        _insert_network(project, name_b)
-        created.append(name_b)
+        _insert_network(project, name_b, cleanup=created)
         result["tests"]["create_vpc_b"] = {"passed": True, "vpc_id": name_b}
 
         # no_peering — both networks should have empty peerings list.
@@ -138,7 +140,7 @@ def main() -> int:
         result["tests"]["sg_isolation_b"] = {"passed": not cross_fw_b, "cross_firewalls": cross_fw_b}
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for n in created:

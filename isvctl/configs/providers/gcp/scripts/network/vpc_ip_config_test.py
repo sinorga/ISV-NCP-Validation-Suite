@@ -29,7 +29,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project
+from common.compute import resolve_project, short_name
 from common.errors import classify_gcp_error, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -65,7 +65,7 @@ def main() -> int:
         zone_names = [url.rsplit("/", 1)[-1] for url in zones]
         idx = 0
         for sub in subnets_c.list(project=project, region=args.region):
-            if not sub.network or not sub.network.endswith(f"/networks/{network}"):
+            if not sub.network or short_name(sub.network) != network:
                 continue
             sub_cidr = sub.ip_cidr_range or ""
             try:
@@ -89,7 +89,7 @@ def main() -> int:
             "ntp_servers": [],
         }
         result["success"] = True
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
 
     print(json.dumps(result, indent=2))

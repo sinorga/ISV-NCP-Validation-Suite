@@ -55,7 +55,7 @@ def test_create_vpc(project: str, name: str) -> dict[str, Any]:
         _insert_network(project, name)
         result["passed"] = True
         result["message"] = f"Created network {name}"
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     return result
 
@@ -73,7 +73,7 @@ def test_read_vpc(project: str, name: str) -> dict[str, Any]:
         result["routing_mode"] = net.routing_config.routing_mode if net.routing_config else None
         result["passed"] = True
         result["message"] = f"Network {name} reachable"
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     return result
 
@@ -119,7 +119,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
             networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=peering_name),
         )
         wait_for_global_op(project, op.name, timeout=180)
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         if peer_created:
@@ -159,7 +159,7 @@ def test_update_dns(project: str, name: str) -> dict[str, Any]:
             result["message"] = "routingMode toggle observed"
         else:
             result["error"] = f"routingMode unchanged: {before} -> {after}"
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     return result
 
@@ -177,7 +177,7 @@ def test_delete_vpc(project: str, name: str) -> dict[str, Any]:
         except gax.NotFound:
             result["passed"] = True
             result["message"] = f"network {name} NotFound after delete"
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     return result
 

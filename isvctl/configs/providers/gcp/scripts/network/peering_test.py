@@ -158,8 +158,10 @@ def main() -> int:
                         ),
                     )
                 )
-                a_routes = sum(1 for r in a_iter if (getattr(r, "status", "") or "").upper() == "ACTIVE")
-                b_routes = sum(1 for r in b_iter if (getattr(r, "status", "") or "").upper() == "ACTIVE")
+                # ExchangedPeeringRoute has no status/state field — gate on
+                # route presence after the parent NetworkPeering ACTIVE check.
+                a_routes = len(a_iter)
+                b_routes = len(b_iter)
             except gax.GoogleAPICallError:
                 a_routes = b_routes = 0
             if a_routes >= 1 and b_routes >= 1:
@@ -186,7 +188,7 @@ def main() -> int:
         }
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for net, peering in peerings_added:

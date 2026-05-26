@@ -104,7 +104,8 @@ def main() -> int:
             "outbound_rule_count": 0,
         }
 
-        # update_sg_add_rule — patch firewall_main appending to allowed[].
+        # update_sg_add_rule — patch firewall_main appending to allowed[];
+        # GATE passed on the readback showing the new port.
         op = firewalls.patch(
             project=project,
             firewall=fw_main,
@@ -116,7 +117,13 @@ def main() -> int:
             ),
         )
         wait_for_global_op(project, op.name, timeout=180)
-        result["tests"]["update_sg_add_rule"] = {"passed": True, "rule_added": "tcp:80"}
+        fw_read = firewalls.get(project=project, firewall=fw_main)
+        ports_after_add = {p for a in fw_read.allowed or () for p in a.ports or ()}
+        result["tests"]["update_sg_add_rule"] = {
+            "passed": "80" in ports_after_add,
+            "rule_added": "tcp:80",
+            "ports_observed": sorted(ports_after_add),
+        }
 
         # update_sg_modify_rule — patch swapping ports (80 → 443).
         op = firewalls.patch(
@@ -130,10 +137,13 @@ def main() -> int:
             ),
         )
         wait_for_global_op(project, op.name, timeout=180)
+        fw_read = firewalls.get(project=project, firewall=fw_main)
+        ports_after_mod = {p for a in fw_read.allowed or () for p in a.ports or ()}
         result["tests"]["update_sg_modify_rule"] = {
-            "passed": True,
+            "passed": "443" in ports_after_mod and "80" not in ports_after_mod,
             "rule_before": "tcp:80",
             "rule_after": "tcp:443",
+            "ports_observed": sorted(ports_after_mod),
         }
 
         # update_sg_remove_rule — delete firewall_aux + NotFound on get.
@@ -162,7 +172,7 @@ def main() -> int:
             result["tests"]["verify_deleted"] = {"passed": True}
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for kind, name in reversed(cleanup_targets):

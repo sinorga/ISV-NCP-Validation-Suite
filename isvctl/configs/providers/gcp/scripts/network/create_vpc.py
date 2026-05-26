@@ -74,10 +74,20 @@ def create_network(
     region: str,
     firewall_name: str,
 ) -> dict[str, Any]:
+    """Create the network + subnets + firewall.
+
+    Stamps `network_created=True` BEFORE the network wait completes so the
+    caller (and downstream teardown) can clean up partial state. On any
+    failure after the network insert succeeds, the partial graph (network
+    + whatever subnets were created + maybe firewall) is left for teardown
+    to enumerate via aggregated/list filters — this stub does not best-
+    effort delete what it just created because the teardown step is the
+    canonical cleanup surface.
+    """
     result: dict[str, Any] = {
         "success": False,
         "platform": "network",
-        "network_id": None,
+        "network_id": network_name,
         "cidr": cidr,
         "subnets": [],
         "security_group_id": None,
@@ -90,6 +100,8 @@ def create_network(
     firewalls = compute_v1.FirewallsClient()
 
     # --- Custom-mode network -------------------------------------------------
+    # Stamp network_created BEFORE the async wait so the caller-side
+    # partial-state-recovery contract holds even if the wait raises.
     network = compute_v1.Network(
         name=network_name,
         description=ISV_DESCRIPTION,
@@ -97,9 +109,8 @@ def create_network(
         routing_config=compute_v1.NetworkRoutingConfig(routing_mode="REGIONAL"),
     )
     op = networks.insert(project=project, network_resource=network)
-    wait_for_global_op(project, op.name, timeout=300)
     result["network_created"] = True
-    result["network_id"] = network_name
+    wait_for_global_op(project, op.name, timeout=300)
 
     # --- Subnetworks (two minimum) -------------------------------------------
     zones = _list_region_zones(project, region)
@@ -117,8 +128,9 @@ def create_network(
             region=region,
         )
         op = subnets.insert(project=project, region=region, subnetwork_resource=sub)
-        _wait_region_op(project, region, op.name, timeout=300)
         net = ipaddress.ip_network(sub_cidr)
+        # Append the subnet record BEFORE the wait so the caller knows the
+        # subnet was created even if the wait raises.
         result["subnets"].append(
             {
                 "subnet_id": sub_name,
@@ -128,6 +140,7 @@ def create_network(
                 "available_ips": max(0, net.num_addresses - _GCE_RESERVED_PER_SUBNET),
             }
         )
+        _wait_region_op(project, region, op.name, timeout=300)
 
     # --- Project-scoped firewall (SG analog) ---------------------------------
     fw = compute_v1.Firewall(
@@ -143,8 +156,8 @@ def create_network(
         target_tags=[PROVENANCE_TAG],
     )
     op = firewalls.insert(project=project, firewall_resource=fw)
-    wait_for_global_op(project, op.name, timeout=300)
     result["security_group_id"] = firewall_name
+    wait_for_global_op(project, op.name, timeout=300)
 
     # --- DHCP options (synthesised — no API) ---------------------------------
     result["dhcp_options"] = {
@@ -171,21 +184,32 @@ def main() -> int:
     name = unique_suffix(args.name)
     firewall_name = unique_suffix(f"{args.name}-fw")
 
+    # The partial-state dict starts pre-stamped with the names we constructed
+    # so that even an early exception emits a JSON payload teardown can act on
+    # (network_id present + network_created flipped to True as soon as the
+    # network insert is dispatched).
+    result: dict[str, Any] = {
+        "success": False,
+        "platform": "network",
+        "network_id": name,
+        "cidr": args.cidr,
+        "subnets": [],
+        "security_group_id": None,
+        "dhcp_options": None,
+        "network_created": False,
+    }
     try:
         result = create_network(project, name, args.cidr, args.region, firewall_name)
     except gax.AlreadyExists as e:
-        result = {
-            "success": False,
-            "platform": "network",
-            "error_type": "api_error",
-            "error": f"resource already exists (verified-reuse not implemented for create_network): {e}",
-            "network_id": name,
-            "cidr": args.cidr,
-            "subnets": [],
-            "security_group_id": None,
-            "dhcp_options": None,
-            "network_created": False,
-        }
+        result["error_type"] = "api_error"
+        result["error"] = f"resource already exists (verified-reuse not implemented for create_network): {e}"
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
+        # Partial-rollback path: result["network_created"] may be True and
+        # result["subnets"] may be non-empty even though we never reached
+        # success=True. Teardown reads these forwarded fields and cleans up.
+        et, em = ("api_error", str(e)) if isinstance(e, gax.GoogleAPICallError) else ("unknown_error", str(e))
+        result["error_type"] = et
+        result["error"] = em
     result["region"] = args.region
     result["name"] = args.name
 

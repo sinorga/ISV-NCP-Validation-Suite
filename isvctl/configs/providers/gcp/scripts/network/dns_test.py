@@ -145,7 +145,7 @@ def main() -> int:
         }
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     except Exception as e:
         result["error"] = str(e)

@@ -126,11 +126,15 @@ def main() -> int:
         result["public_ip"] = public_ip
         if not public_ip:
             raise RuntimeError("instance has no external IP — accessConfigs missing")
-        wait_for_ssh(public_ip, SSH_USER, key_path, max_attempts=30, interval=10)
-        result["success"] = True
-    except gax.GoogleAPICallError as e:
+        if not wait_for_ssh(public_ip, SSH_USER, key_path, max_attempts=30, interval=10):
+            result["error"] = "ssh did not come up — DhcpIpManagementCheck cannot probe"
+        else:
+            result["success"] = True
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
-    finally:
+        # Best-effort cleanup-on-failure: the validator does not need an
+        # instance left behind when we never got SSH. Happy-path leaves the
+        # instance for the teardown step (per dhcp_ip_test divergence note).
         if instance_created:
             delete_with_retry(
                 lambda: wait_for_zonal_op(
@@ -141,11 +145,11 @@ def main() -> int:
                 ),
                 resource_desc=f"instance {name}",
             )
-        # Local key file is forwarded to teardown via key_file/key_name so we
-        # do NOT delete it here in the success path. On error, also keep the
-        # file so the operator can debug; teardown's --key-created gate
-        # cleans up.
 
+    # Note: on the happy path we LEAVE the instance running so the validator
+    # (DhcpIpManagementCheck) can SSH in. The teardown step is responsible
+    # for instance + local-PEM cleanup via the forwarded
+    # --key-file / --key-created contract.
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
 

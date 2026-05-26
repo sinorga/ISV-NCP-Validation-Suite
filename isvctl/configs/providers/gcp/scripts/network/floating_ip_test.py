@@ -240,10 +240,18 @@ def main() -> int:
         result["tests"]["verify_not_on_a"] = {"passed": a_pub2 != address_value, "public_ip": a_pub2}
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
-        for kind, n in reversed(cleanup):
+        # Cleanup ordering matters here: the static external address is held
+        # by whichever instance currently owns its accessConfig. Delete order
+        # MUST be instances first (releases the address) → address → subnet
+        # → network. Default reversed() over the tracker list runs in
+        # reverse-append order: address → instance_b → instance_a → subnet
+        # → network, which leaks the address (deletion fails with non-
+        # retryable BadRequest while the address is in use).
+        priority = {"instance": 0, "address": 1, "subnet": 2, "network": 3}
+        for kind, n in sorted(cleanup, key=lambda kv: priority.get(kv[0], 99)):
             try:
                 if kind == "instance":
                     delete_with_retry(

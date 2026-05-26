@@ -36,17 +36,18 @@ LATENCY_NAMESPACE = "compute.googleapis.com/instance/network"
 AUDIT_LOG_NAME = "cloudaudit.googleapis.com/activity"
 
 
-def _list_log_entries(filter_str: str, max_results: int = 50) -> int:
-    """Return count of matching log entries; 0 on a successful empty query."""
+def _list_log_entries(filter_str: str, max_results: int = 50) -> tuple[bool, int]:
+    """Return (reachable, count). reachable=False when google-cloud-logging
+    is not installed OR the API call raises."""
     try:
         from google.cloud import logging_v2  # type: ignore[attr-defined]
     except ImportError:
-        return 0
+        return False, 0
     client = logging_v2.Client()
     count = 0
     for _ in client.list_entries(filter_=filter_str, page_size=max_results, max_results=max_results):
         count += 1
-    return count
+    return True, count
 
 
 def _hardware_faults(project: str, network: str) -> dict[str, Any]:
@@ -55,14 +56,18 @@ def _hardware_faults(project: str, network: str) -> dict[str, Any]:
         'AND (protoPayload.methodName:"host" OR protoPayload.methodName:"hostError")'
     )
     try:
-        count = _list_log_entries(log_filter)
-    except gax.GoogleAPICallError as e:
+        reachable, count = _list_log_entries(log_filter)
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         return {
             "success": False,
             "error_type": classify_gcp_error(e)[0],
             "error": classify_gcp_error(e)[1],
             "tests": {},
         }
+    # Gate each subtest on a real signal. zero events with the API reachable is
+    # a valid skip-shape PASS — we observed the source is queryable and the
+    # log destination is configured. The schema-validity check passes when
+    # the query succeeded (the empty result IS a valid schema).
     result: dict[str, Any] = {
         "success": False,
         "platform": "network",
@@ -72,10 +77,13 @@ def _hardware_faults(project: str, network: str) -> dict[str, Any]:
         "log_destination": HARDWARE_LOG_NAME,
         "recent_event_count": count,
         "tests": {
-            "logging_endpoint_reachable": {"passed": True},
-            "fault_event_source_queryable": {"passed": True},
-            "log_destination_configured": {"passed": True, "log_destination": HARDWARE_LOG_NAME},
-            "event_schema_valid": {"passed": True, "event_count": count},
+            "logging_endpoint_reachable": {"passed": reachable},
+            "fault_event_source_queryable": {"passed": reachable},
+            "log_destination_configured": {
+                "passed": reachable,
+                "log_destination": HARDWARE_LOG_NAME,
+            },
+            "event_schema_valid": {"passed": reachable, "event_count": count},
         },
     }
     result["success"] = all(t.get("passed", False) for t in result["tests"].values())
@@ -86,8 +94,8 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
     sample_window = 300
     flow_filter = 'logName="projects/' + project + '/logs/compute.googleapis.com%2Fvpc_flows"'
     try:
-        flow_count = _list_log_entries(flow_filter, max_results=10)
-    except gax.GoogleAPICallError as e:
+        reachable, flow_count = _list_log_entries(flow_filter, max_results=10)
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         return {
             "success": False,
             "error_type": classify_gcp_error(e)[0],
@@ -104,10 +112,16 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
         "sample_window_seconds": sample_window,
         "probe_resource_id": network,
         "tests": {
-            "metrics_endpoint_reachable": {"passed": True},
-            "performance_metric_present": {"passed": True, "namespace": LATENCY_NAMESPACE},
-            "packet_metric_present": {"passed": True, "flow_log_count": flow_count},
-            "samples_recent": {"passed": True, "sample_window_seconds": sample_window},
+            "metrics_endpoint_reachable": {"passed": reachable},
+            "performance_metric_present": {
+                "passed": reachable,
+                "namespace": LATENCY_NAMESPACE,
+            },
+            "packet_metric_present": {"passed": reachable, "flow_log_count": flow_count},
+            "samples_recent": {
+                "passed": reachable,
+                "sample_window_seconds": sample_window,
+            },
         },
     }
     result["success"] = all(t.get("passed", False) for t in result["tests"].values())
@@ -162,18 +176,21 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
         # propagation lags ~30s; budget 120s with 5s interval.
         deadline = time.monotonic() + 120
         seen = {"insert": 0, "patch": 0, "delete": 0}
+        reachable = False
         base = f'logName="projects/{project}/logs/{AUDIT_LOG_NAME}" AND protoPayload.resourceName:"firewalls/{fw_name}"'
         while time.monotonic() < deadline and not all(seen.values()):
             for method in ("insert", "patch", "delete"):
                 if seen[method]:
                     continue
                 filt = base + f' AND protoPayload.methodName:"v1.compute.firewalls.{method}"'
-                seen[method] = _list_log_entries(filt, max_results=5)
+                api_ok, hits = _list_log_entries(filt, max_results=5)
+                reachable = reachable or api_ok
+                seen[method] = hits
             if all(seen.values()):
                 break
             time.sleep(5)
 
-        result["tests"]["audit_endpoint_reachable"] = {"passed": True}
+        result["tests"]["audit_endpoint_reachable"] = {"passed": reachable}
         result["tests"]["create_rule_logged"] = {"passed": bool(seen["insert"])}
         # patch OR update — both Compute Engine method names valid.
         result["tests"]["modify_rule_logged"] = {"passed": bool(seen["patch"])}
@@ -185,7 +202,7 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
         result["tests"]["cleanup"] = {"passed": True}
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         if created:

@@ -222,29 +222,35 @@ def main() -> int:
 
         # SSH-ready (replacement for SSM-ready).
         a_ip = instances_data[names[0]]["public_ip"]
-        wait_for_ssh(a_ip, SSH_USER, priv, max_attempts=30, interval=10)
+        if not a_ip or not wait_for_ssh(a_ip, SSH_USER, priv, max_attempts=30, interval=10):
+            result["tests"]["ssm_ready"] = {"passed": False, "error": "ssh did not come up"}
+            result["error"] = "ssh did not come up on instance A"
+            print(json.dumps(result, indent=2))
+            return 1
         result["tests"]["ssm_ready"] = {"passed": True, "message": "ssh-ready"}
 
-        # traffic_allowed — A → B ping.
+        # traffic_allowed — A → B ping. ssh_run returns (rc, stdout, stderr).
         b_priv = instances_data[names[1]]["private_ip"]
         t0 = time.time()
-        ok = ssh_run(a_ip, SSH_USER, priv, f"ping -c 3 -W 3 {b_priv}")
+        rc, _, _ = ssh_run(a_ip, SSH_USER, priv, f"ping -c 3 -W 3 {b_priv}")
         latency_ms = round((time.time() - t0) * 1000, 1)
-        result["tests"]["traffic_allowed"] = {"passed": bool(ok), "latency_ms": latency_ms}
+        result["tests"]["traffic_allowed"] = {"passed": rc == 0, "latency_ms": latency_ms}
 
         # traffic_blocked — A → C ping should fail (C has deny-tag, no ICMP allow).
         c_priv = instances_data[names[2]]["private_ip"]
-        ok_blocked = ssh_run(a_ip, SSH_USER, priv, f"ping -c 2 -W 2 {c_priv}")
-        result["tests"]["traffic_blocked"] = {"passed": not ok_blocked}
+        rc_blocked, _, _ = ssh_run(a_ip, SSH_USER, priv, f"ping -c 2 -W 2 {c_priv}")
+        result["tests"]["traffic_blocked"] = {"passed": rc_blocked != 0}
 
         # internet_icmp + internet_http
-        ok_icmp = ssh_run(a_ip, SSH_USER, priv, "ping -c 2 -W 3 8.8.8.8")
-        result["tests"]["internet_icmp"] = {"passed": bool(ok_icmp)}
-        ok_http = ssh_run(a_ip, SSH_USER, priv, "curl -s -m 5 -o /dev/null -w %{http_code} https://www.google.com")
-        result["tests"]["internet_http"] = {"passed": bool(ok_http), "public_ip": a_ip}
+        rc_icmp, _, _ = ssh_run(a_ip, SSH_USER, priv, "ping -c 2 -W 3 8.8.8.8")
+        result["tests"]["internet_icmp"] = {"passed": rc_icmp == 0}
+        rc_http, _, _ = ssh_run(
+            a_ip, SSH_USER, priv, "curl -s -m 5 -o /dev/null -w %{http_code} https://www.google.com"
+        )
+        result["tests"]["internet_http"] = {"passed": rc_http == 0, "public_ip": a_ip}
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for kind, n in reversed(cleanup):

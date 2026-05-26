@@ -87,9 +87,10 @@ def main() -> int:
             "message": f"{len(rules)} INGRESS rules on default-deny network",
         }
 
-        # sg_allows_specific_ssh — narrow sourceRange firewall.
+        # sg_allows_specific_ssh — narrow sourceRange firewall + readback gate.
         ssh_fw = unique_suffix("ssh-allow")
         allowed_cidr = "203.0.113.0/24"
+        cleanup.append(("firewall", ssh_fw))
         _insert_firewall(
             project,
             compute_v1.Firewall(
@@ -101,15 +102,20 @@ def main() -> int:
                 allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22"])],
             ),
         )
-        cleanup.append(("firewall", ssh_fw))
+        fw_read = firewalls.get(project=project, firewall=ssh_fw)
+        ssh_ok = allowed_cidr in (fw_read.source_ranges or ()) and any(
+            "22" in (a.ports or ()) for a in fw_read.allowed or ()
+        )
         result["tests"]["sg_allows_specific_ssh"] = {
-            "passed": True,
+            "passed": ssh_ok,
             "sg_id": ssh_fw,
             "allowed_cidr": allowed_cidr,
         }
 
-        # sg_denies_vpc_icmp — narrow no-ICMP firewall (no ICMP allow rule).
+        # sg_denies_vpc_icmp — firewall without ICMP allow; gate on readback
+        # NOT containing icmp in allowed[].
         icmp_fw = unique_suffix("no-icmp")
+        cleanup.append(("firewall", icmp_fw))
         _insert_firewall(
             project,
             compute_v1.Firewall(
@@ -121,11 +127,16 @@ def main() -> int:
                 allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["80"])],
             ),
         )
-        cleanup.append(("firewall", icmp_fw))
-        result["tests"]["sg_denies_vpc_icmp"] = {"passed": True, "sg_id": icmp_fw}
+        fw_read = firewalls.get(project=project, firewall=icmp_fw)
+        protos = {a.i_p_protocol for a in fw_read.allowed or ()}
+        result["tests"]["sg_denies_vpc_icmp"] = {
+            "passed": "icmp" not in protos,
+            "sg_id": icmp_fw,
+        }
 
-        # nacl_explicit_deny — deny-action firewall at lower priority.
+        # nacl_explicit_deny — deny-action firewall at lower priority + readback.
         deny_fw = unique_suffix("deny-rule")
+        cleanup.append(("firewall", deny_fw))
         _insert_firewall(
             project,
             compute_v1.Firewall(
@@ -138,8 +149,9 @@ def main() -> int:
                 denied=[compute_v1.Denied(I_p_protocol="tcp", ports=["3389"])],
             ),
         )
-        cleanup.append(("firewall", deny_fw))
-        result["tests"]["nacl_explicit_deny"] = {"passed": True, "nacl_id": deny_fw}
+        fw_read = firewalls.get(project=project, firewall=deny_fw)
+        deny_ok = bool(fw_read.denied) and fw_read.priority == 100
+        result["tests"]["nacl_explicit_deny"] = {"passed": deny_ok, "nacl_id": deny_fw}
 
         # default_nacl_allows_inbound — honest platform-difference note.
         result["tests"]["default_nacl_allows_inbound"] = {
@@ -147,8 +159,11 @@ def main() -> int:
             "message": "Compute Engine default-deny INGRESS — platform-difference noted",
         }
 
-        # sg_restricted_egress — allow tcp:443 + deny-all at higher priority.
+        # sg_restricted_egress — allow tcp:443 at lower priority + deny-all at
+        # higher priority; gate on both firewalls reading back the requested
+        # priority + direction.
         egress_allow = unique_suffix("egr-https")
+        cleanup.append(("firewall", egress_allow))
         _insert_firewall(
             project,
             compute_v1.Firewall(
@@ -161,8 +176,8 @@ def main() -> int:
                 allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["443"])],
             ),
         )
-        cleanup.append(("firewall", egress_allow))
         egress_deny = unique_suffix("egr-deny")
+        cleanup.append(("firewall", egress_deny))
         _insert_firewall(
             project,
             compute_v1.Firewall(
@@ -175,14 +190,22 @@ def main() -> int:
                 denied=[compute_v1.Denied(I_p_protocol="all")],
             ),
         )
-        cleanup.append(("firewall", egress_deny))
+        allow_read = firewalls.get(project=project, firewall=egress_allow)
+        deny_read = firewalls.get(project=project, firewall=egress_deny)
+        egress_ok = (
+            allow_read.direction == "EGRESS"
+            and allow_read.priority == 900
+            and deny_read.direction == "EGRESS"
+            and deny_read.priority == 1000
+            and bool(deny_read.denied)
+        )
         result["tests"]["sg_restricted_egress"] = {
-            "passed": True,
+            "passed": egress_ok,
             "sg_id": egress_allow,
         }
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for kind, n in reversed(cleanup):

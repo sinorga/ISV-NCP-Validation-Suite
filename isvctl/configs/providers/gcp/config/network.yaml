@@ -53,7 +53,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.99.0.0/16"
-        timeout: 300
+        timeout: 120
         output_schema: vpc_crud
 
       - name: subnet_config
@@ -66,7 +66,7 @@ commands:
           - "10.98.0.0/16"
           - "--subnet-count"
           - "4"
-        timeout: 300
+        timeout: 120
         output_schema: subnet_config
 
       - name: vpc_isolation
@@ -79,7 +79,7 @@ commands:
           - "10.97.0.0/16"
           - "--cidr-b"
           - "10.96.0.0/16"
-        timeout: 300
+        timeout: 120
         output_schema: vpc_isolation
 
       - name: sg_crud
@@ -90,7 +90,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.95.0.0/16"
-        timeout: 300
+        timeout: 120
         output_schema: sg_crud
 
       - name: security_blocking
@@ -101,7 +101,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.94.0.0/16"
-        timeout: 300
+        timeout: 120
         output_schema: security_blocking
 
       - name: sg_workload_scoping
@@ -120,7 +120,7 @@ commands:
         phase: test
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
-        timeout: 300
+        timeout: 120
 
       - name: sg_service_scoping
         phase: test
@@ -198,7 +198,7 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--region"
           - "{{region}}"
-        timeout: 300
+        timeout: 120
         output_schema: vpc_ip_config
 
       - name: dhcp_ip_test
@@ -226,7 +226,7 @@ commands:
           - "100.64.0.0/16"
           - "--standard-cidr"
           - "10.90.0.0/16"
-        timeout: 300
+        timeout: 120
         output_schema: byoip
 
       - name: stable_ip_test
@@ -263,7 +263,7 @@ commands:
           - "10.89.0.0/16"
           - "--domain"
           - "internal.isv.test"
-        timeout: 300
+        timeout: 120
         output_schema: localized_dns
 
       - name: peering_test

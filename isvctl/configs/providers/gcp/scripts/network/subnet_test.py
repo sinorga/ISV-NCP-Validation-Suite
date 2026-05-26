@@ -83,7 +83,8 @@ def main() -> int:
     created_subnets: list[str] = []
     network_created = False
     try:
-        # Setup network
+        # Setup network. Stamp the tracker BEFORE the wait so a wait failure
+        # still surfaces the partial-create graph to the cleanup finally.
         op = networks.insert(
             project=project,
             network_resource=compute_v1.Network(
@@ -92,8 +93,8 @@ def main() -> int:
                 auto_create_subnetworks=False,
             ),
         )
-        wait_for_global_op(project, op.name, timeout=300)
         network_created = True
+        wait_for_global_op(project, op.name, timeout=300)
         result["tests"]["create_vpc"] = {"passed": True, "vpc_id": network_name}
 
         zones = _list_region_zones(project, args.region)
@@ -113,8 +114,8 @@ def main() -> int:
                 region=args.region,
             )
             op = subnets_client.insert(project=project, region=args.region, subnetwork_resource=sub)
-            _wait_region_op(project, args.region, op.name, timeout=300)
             created_subnets.append(sub_name)
+            _wait_region_op(project, args.region, op.name, timeout=300)
             subnets_emitted.append(
                 {
                     "subnet_id": sub_name,
@@ -146,7 +147,7 @@ def main() -> int:
         }
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
-    except gax.GoogleAPICallError as e:
+    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         et, em = classify_gcp_error(e)
         result["error_type"], result["error"] = et, em
     finally:
