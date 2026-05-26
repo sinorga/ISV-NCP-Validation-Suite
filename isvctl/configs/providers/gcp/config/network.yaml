@@ -38,7 +38,7 @@ commands:
         command: "python3 ../scripts/network/create_vpc.py"
         args:
           - "--name"
-          - "isv-shared-vpc-sg-crud"
+          - "isv-shared-vpc"
           - "--region"
           - "{{region}}"
           - "--cidr"
@@ -53,13 +53,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.99.0.0/16"
-        # 600s budget — Compute Engine inserts a network, then mutates
-        # (add_peering / patch / delete) which all hit a post-insert
-        # "is not ready" 400 window that can persist for tens of seconds.
-        # The stub retries each mutation up to ~60s; with multiple
-        # mutations + orphan-adopt + per-op global waits the test routinely
-        # exceeds the AWS-oracle 120s default.
-        timeout: 600
+        timeout: 120
         output_schema: vpc_crud
 
       - name: subnet_config
@@ -72,12 +66,7 @@ commands:
           - "10.98.0.0/16"
           - "--subnet-count"
           - "4"
-        # 600s budget — Compute Engine subnetworks are regional and each
-        # SubnetworksClient.insert waits for a regional op DONE (~30–60s
-        # apiece). With 4 sequential creates + 1 network create + cleanup
-        # the worst case approaches 5 minutes; the 120s default mirrored
-        # from the AWS oracle (where subnet creates are ~3–5s) times out.
-        timeout: 600
+        timeout: 120
         output_schema: subnet_config
 
       - name: vpc_isolation
@@ -90,10 +79,7 @@ commands:
           - "10.97.0.0/16"
           - "--cidr-b"
           - "10.96.0.0/16"
-        # 600s budget — two networks created + listed + cleaned up, each
-        # global op ~30–60s on Compute Engine, plus the orphan-adopt
-        # path when a prior killed run leaves leftovers.
-        timeout: 600
+        timeout: 120
         output_schema: vpc_isolation
 
       - name: sg_crud
@@ -104,15 +90,11 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.95.0.0/16"
-        # 600s budget — one network + two firewalls + patch/delete/get
-        # cycle, each global op ~30–60s on Compute Engine, plus the
-        # orphan-adopt path when a prior killed run leaves leftovers.
-        timeout: 600
+        timeout: 120
         output_schema: sg_crud
 
       - name: security_blocking
         phase: test
-        skip: true
         command: "python3 ../scripts/network/security_test.py"
         args:
           - "--region"
@@ -124,35 +106,30 @@ commands:
 
       - name: sg_workload_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
         timeout: 600
 
       - name: sg_node_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
         timeout: 600
 
       - name: sg_subnet_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
         timeout: 120
 
       - name: sg_service_scoping
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
         timeout: 900
 
       - name: sdn_hardware_fault_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -165,7 +142,6 @@ commands:
 
       - name: sdn_latency_perf_logging
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -178,7 +154,6 @@ commands:
 
       - name: sdn_filter_audit_trail
         phase: test
-        skip: true
         command: "python3 ../scripts/network/sdn_logging_test.py"
         args:
           - "--region"
@@ -191,7 +166,6 @@ commands:
 
       - name: connectivity_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/test_connectivity.py"
         args:
           - "--vpc-id"
@@ -207,7 +181,6 @@ commands:
 
       - name: traffic_validation
         phase: test
-        skip: true
         command: "python3 ../scripts/network/traffic_test.py"
         args:
           - "--region"
@@ -219,7 +192,6 @@ commands:
 
       - name: vpc_ip_config
         phase: test
-        skip: true
         command: "python3 ../scripts/network/vpc_ip_config_test.py"
         args:
           - "--vpc-id"
@@ -231,7 +203,6 @@ commands:
 
       - name: dhcp_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dhcp_ip_test.py"
         args:
           - "--vpc-id"
@@ -247,7 +218,6 @@ commands:
 
       - name: byoip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/byoip_test.py"
         args:
           - "--region"
@@ -261,7 +231,6 @@ commands:
 
       - name: stable_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/stable_ip_test.py"
         args:
           - "--region"
@@ -273,7 +242,6 @@ commands:
 
       - name: floating_ip_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/floating_ip_test.py"
         args:
           - "--region"
@@ -287,7 +255,6 @@ commands:
 
       - name: dns_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/dns_test.py"
         args:
           - "--region"
@@ -301,7 +268,6 @@ commands:
 
       - name: peering_test
         phase: test
-        skip: true
         command: "python3 ../scripts/network/peering_test.py"
         args:
           - "--region"
