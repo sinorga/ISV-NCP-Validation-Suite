@@ -23,6 +23,8 @@ import argparse
 import json
 import os
 import sys
+import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -38,11 +40,71 @@ from common.compute import (
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
+from requests import exceptions as rqx
 
 
 def _is_auto_route(route: compute_v1.Route) -> bool:
     name = route.name or ""
     return name.startswith("default-route-") or bool(route.next_hop_network)
+
+
+def _is_not_ready(e: Exception) -> bool:
+    """GCE returns 400 'is not ready' on subnet/network deletes while the
+    backend resource is still settling from a recent op. This is a
+    transient state that the common ``delete_with_retry`` treats as
+    non-transient (BadRequest is in the catch-all branch). Mirrors the
+    pattern vpc_crud_test introduced for post-insert mutations.
+    """
+    if not isinstance(e, gax.BadRequest):
+        return False
+    msg = str(e)
+    return "is not ready" in msg or "resourceNotReady" in msg
+
+
+# Connection-level transients raised by requests/urllib3 underneath the
+# compute_v1 REST transport during the wait_for_*_op poll loops. These
+# are network hiccups, not GCE-state errors — the operation itself is
+# still progressing server-side, so retrying the SAME wait_for_*_op call
+# is safe (op_name is stable, a polled DONE returns immediately).
+_TRANSIENT_CONNECTION_EXCEPTIONS = (
+    rqx.SSLError,
+    rqx.ConnectionError,
+    rqx.Timeout,
+    rqx.ChunkedEncodingError,
+)
+
+
+def _with_readiness_retry(
+    op_fn: Callable[[], Any],
+    *,
+    attempts: int = 12,
+    backoff: float = 5.0,
+    desc: str = "resource",
+) -> Any:
+    """Retry ``op_fn`` on GCE 'is not ready' BadRequest plus transient
+    connection errors (SSL EOF / ConnectionReset) from the underlying
+    requests transport.
+    """
+    for attempt in range(1, attempts + 1):
+        try:
+            return op_fn()
+        except gax.BadRequest as e:
+            if not _is_not_ready(e) or attempt >= attempts:
+                raise
+            print(
+                f"  {desc} not yet ready ({type(e).__name__}); attempt {attempt}/{attempts}, sleeping {backoff}s",
+                file=sys.stderr,
+            )
+            time.sleep(backoff)
+        except _TRANSIENT_CONNECTION_EXCEPTIONS as e:
+            if attempt >= attempts:
+                raise
+            print(
+                f"  {desc} transient connection ({type(e).__name__}); attempt {attempt}/{attempts}, sleeping {backoff}s",
+                file=sys.stderr,
+            )
+            time.sleep(backoff)
+    raise RuntimeError(f"unreachable: readiness retry loop exited without return for {desc}")
 
 
 def _delete_network_resources(
@@ -156,16 +218,22 @@ def _delete_network_resources(
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         print(f"WARN: peering enumeration failed: {e}", file=sys.stderr)
 
-    # Subnets (regional).
+    # Subnets (regional). Subnets can sit in a 'not ready' window for
+    # tens of seconds after their parent network's recent ops; wrap the
+    # delete in a readiness retry so transient 400s don't propagate as
+    # non-transient failures.
     try:
         for sub in subnets_c.list(project=project, region=region):
             if short_name(sub.network) == network:
                 ok = delete_with_retry(
-                    lambda nn=sub.name: wait_for_region_op(
-                        project,
-                        region,
-                        subnets_c.delete(project=project, region=region, subnetwork=nn).name,
-                        timeout=180,
+                    lambda nn=sub.name: _with_readiness_retry(
+                        lambda: wait_for_region_op(
+                            project,
+                            region,
+                            subnets_c.delete(project=project, region=region, subnetwork=nn).name,
+                            timeout=180,
+                        ),
+                        desc=f"subnet {nn}",
                     ),
                     resource_desc=f"subnet {sub.name}",
                 )
@@ -192,13 +260,18 @@ def _delete_network_resources(
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         print(f"WARN: address enumeration failed: {e}", file=sys.stderr)
 
-    # Network last.
+    # Network last. Same readiness retry as subnets — a network can sit
+    # in 'is not ready' state immediately after firewall/peering/route
+    # cleanup ops complete, before its own delete becomes acceptable.
     try:
         ok = delete_with_retry(
-            lambda: wait_for_global_op(
-                project,
-                networks_c.delete(project=project, network=network).name,
-                timeout=300,
+            lambda: _with_readiness_retry(
+                lambda: wait_for_global_op(
+                    project,
+                    networks_c.delete(project=project, network=network).name,
+                    timeout=300,
+                ),
+                desc=f"network {network}",
             ),
             resource_desc=f"network {network}",
         )
