@@ -41,6 +41,7 @@ from common.compute import (
     resolve_project,
     unique_suffix,
     wait_for_global_op,
+    wait_for_region_op,
     wait_for_zonal_op,
 )
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
@@ -84,12 +85,7 @@ def _insert_subnet(
         ),
     )
     cleanup.append(("subnet", name))
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op.name,
-        timeout=180,
-    )
+    wait_for_region_op(project, region, op.name, timeout=180)
 
 
 def _insert_firewall_with_tags(
@@ -160,12 +156,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
             ),
         )
         cleanup.append(("subnet", sub))
-        compute_v1.RegionOperationsClient().wait(
-            project=project,
-            region=region,
-            operation=op.name,
-            timeout=180,
-        )
+        wait_for_region_op(project, region, op.name, timeout=180)
 
         op = firewalls.insert(
             project=project,
@@ -266,10 +257,10 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                     )
                 elif kind == "subnet":
                     delete_with_retry(
-                        lambda nn=n: compute_v1.RegionOperationsClient().wait(
-                            project=project,
-                            region=region,
-                            operation=subnets_c.delete(project=project, region=region, subnetwork=nn).name,
+                        lambda nn=n: wait_for_region_op(
+                            project,
+                            region,
+                            subnets_c.delete(project=project, region=region, subnetwork=nn).name,
                             timeout=180,
                         ),
                         resource_desc=f"subnet {n}",
@@ -350,10 +341,10 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
                 )
             elif kind == "subnet":
                 delete_with_retry(
-                    lambda nn=n: compute_v1.RegionOperationsClient().wait(
-                        project=project,
-                        region=region,
-                        operation=subnets_c.delete(project=project, region=region, subnetwork=nn).name,
+                    lambda nn=n: wait_for_region_op(
+                        project,
+                        region,
+                        subnets_c.delete(project=project, region=region, subnetwork=nn).name,
                         timeout=180,
                     ),
                     resource_desc=f"subnet {n}",
@@ -538,12 +529,7 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
             ),
         )
         cleanup.append(("subnet", sub))
-        compute_v1.RegionOperationsClient().wait(
-            project=project,
-            region=region,
-            operation=op.name,
-            timeout=180,
-        )
+        wait_for_region_op(project, region, op.name, timeout=180)
 
         # Firewall with targetServiceAccounts.
         op = firewalls_c.insert(
@@ -665,10 +651,10 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                     )
                 elif kind == "subnet":
                     delete_with_retry(
-                        lambda nn=n: compute_v1.RegionOperationsClient().wait(
-                            project=project,
-                            region=region,
-                            operation=subnets_c.delete(project=project, region=region, subnetwork=nn).name,
+                        lambda nn=n: wait_for_region_op(
+                            project,
+                            region,
+                            subnets_c.delete(project=project, region=region, subnetwork=nn).name,
                             timeout=180,
                         ),
                         resource_desc=f"subnet {n}",

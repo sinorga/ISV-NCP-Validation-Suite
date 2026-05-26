@@ -14,7 +14,7 @@ Divergences from the AWS oracle:
     `ManagedZone.visibility` / `_properties` set-property pattern is
     SILENTLY DROPPED by google-cloud-dns 0.36.x's
     `ManagedZone._build_resource()` — POST the explicit body via the
-    lower-level connection (factory override).
+    lower-level connection (vendor-API override).
 """
 
 from __future__ import annotations
@@ -28,21 +28,16 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import (
+    resolve_project,
+    unique_suffix,
+    wait_for_global_op,
+)
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
 ISV_DESCRIPTION = "isvtest dns_test — verified-reuse marker"
-
-
-def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 300) -> None:
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op_name,
-        timeout=timeout,
-    )
 
 
 @handle_gcp_errors

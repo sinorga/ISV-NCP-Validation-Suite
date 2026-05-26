@@ -22,6 +22,7 @@ import json
 import os
 import sys
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -35,7 +36,16 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest vpc_crud — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str, routing: str = "REGIONAL") -> None:
+def _insert_network(
+    project: str,
+    name: str,
+    *,
+    on_dispatch: Callable[[], None] | None = None,
+    routing: str = "REGIONAL",
+) -> None:
+    """Insert a network and wait. The optional ``on_dispatch`` callback fires
+    after ``insert()`` returns but BEFORE the wait — callers use it to stamp
+    a cleanup tracker so the partial-create graph survives a wait failure."""
     networks = compute_v1.NetworksClient()
     op = networks.insert(
         project=project,
@@ -46,13 +56,17 @@ def _insert_network(project: str, name: str, routing: str = "REGIONAL") -> None:
             routing_config=compute_v1.NetworkRoutingConfig(routing_mode=routing),
         ),
     )
+    if on_dispatch is not None:
+        on_dispatch()
     wait_for_global_op(project, op.name, timeout=300)
 
 
-def test_create_vpc(project: str, name: str) -> dict[str, Any]:
+def test_create_vpc(project: str, name: str, tracker: dict[str, bool]) -> dict[str, Any]:
+    """Track create-success BEFORE the wait so a failing wait still triggers
+    teardown of the accepted-but-not-DONE network."""
     result: dict[str, Any] = {"passed": False, "vpc_id": name}
     try:
-        _insert_network(project, name)
+        _insert_network(project, name, on_dispatch=lambda: tracker.__setitem__("created", True))
         result["passed"] = True
         result["message"] = f"Created network {name}"
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
@@ -88,11 +102,14 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     result: dict[str, Any] = {"passed": False, "mutation": "temporary_peering_add_remove"}
     networks = compute_v1.NetworksClient()
     peer_name = unique_suffix(f"{name}-peer", length=4)
-    peer_created = False
+    peer_tracker: dict[str, bool] = {"created": False}
     peering_name = unique_suffix("crud-peer", length=4)
     try:
-        _insert_network(project, peer_name)
-        peer_created = True
+        _insert_network(
+            project,
+            peer_name,
+            on_dispatch=lambda: peer_tracker.__setitem__("created", True),
+        )
         op = networks.add_peering(
             project=project,
             network=name,
@@ -122,7 +139,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
-        if peer_created:
+        if peer_tracker["created"]:
             delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
@@ -202,24 +219,27 @@ def main() -> int:
         "region": args.region,
     }
 
-    cleanup_needed = False
+    # Tracker is flipped TRUE by the on_dispatch callback inside
+    # test_create_vpc the instant the insert() call returns, BEFORE the wait.
+    # This guarantees the finally block tears the accepted-but-not-DONE
+    # network down even if the wait itself raised.
+    tracker: dict[str, bool] = {"created": False}
     try:
-        result["tests"]["create_vpc"] = test_create_vpc(project, name)
+        result["tests"]["create_vpc"] = test_create_vpc(project, name, tracker)
         if not result["tests"]["create_vpc"]["passed"]:
             print(json.dumps(result, indent=2))
             return 1
-        cleanup_needed = True
 
         result["tests"]["read_vpc"] = test_read_vpc(project, name)
         result["tests"]["update_tags"] = test_update_tags(project, name)
         result["tests"]["update_dns"] = test_update_dns(project, name)
         result["tests"]["delete_vpc"] = test_delete_vpc(project, name)
         if result["tests"]["delete_vpc"]["passed"]:
-            cleanup_needed = False
+            tracker["created"] = False
 
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     finally:
-        if cleanup_needed:
+        if tracker["created"]:
             networks = compute_v1.NetworksClient()
             delete_with_retry(
                 lambda: wait_for_global_op(

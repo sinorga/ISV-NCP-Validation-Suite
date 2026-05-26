@@ -554,6 +554,33 @@ def wait_for_global_op(project: str, operation_name: str, *, timeout: int = 600)
         time.sleep(3)
 
 
+def wait_for_region_op(
+    project: str, region: str, operation_name: str, *, timeout: int = 600,
+) -> compute_v1.Operation:
+    """Block until a regional Compute Operation reaches DONE.
+
+    Mirrors the zonal/global helpers — uses RegionOperationsClient.get in a
+    poll loop instead of RegionOperationsClient.wait, which the vendor
+    docs note may return non-DONE at its server-side cap. Subnetwork /
+    Address / regional firewall callers should use this helper instead
+    of a per-stub wrapper.
+    """
+    client = compute_v1.RegionOperationsClient()
+    deadline = time.monotonic() + timeout
+    while True:
+        op = client.get(project=project, region=region, operation=operation_name)
+        if op.status == compute_v1.Operation.Status.DONE:
+            if op.error and op.error.errors:
+                msg = "; ".join(
+                    f"{getattr(e, 'code', '')}:{getattr(e, 'message', str(e))}" for e in op.error.errors
+                )
+                raise RuntimeError(f"Region op {operation_name} failed: {msg}")
+            return op
+        if time.monotonic() >= deadline:
+            raise TimeoutError(f"Regional operation {operation_name} did not complete in {timeout}s")
+        time.sleep(3)
+
+
 # --------------------------------------------------------------------- #
 # Instance polling                                                      #
 # --------------------------------------------------------------------- #

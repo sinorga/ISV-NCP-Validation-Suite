@@ -9,7 +9,7 @@ Verified-reuse cleanup contract: gate every delete on the
 Delete order: instances → firewalls → subnets → routes → peerings →
 addresses → network. NotFound counts as success. Local SSH key files
 (forwarded via --key-file / --key-name / --key-created) are deleted
-even when the cloud read returns NotFound (factory rule).
+even when the cloud read returns NotFound (vendor-API contract).
 
 Auto-routes (Route.name starts with "default-route-" with
 next_hop_network set) cannot be deleted via routes.delete (HTTP 400
@@ -28,7 +28,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, short_name, wait_for_global_op, wait_for_zonal_op
+from common.compute import (
+    resolve_project,
+    short_name,
+    wait_for_global_op,
+    wait_for_region_op,
+    wait_for_zonal_op,
+)
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -37,15 +43,6 @@ from google.cloud import compute_v1
 def _is_auto_route(route: compute_v1.Route) -> bool:
     name = route.name or ""
     return name.startswith("default-route-") or bool(route.next_hop_network)
-
-
-def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 300) -> None:
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op_name,
-        timeout=timeout,
-    )
 
 
 def _delete_network_resources(
@@ -164,7 +161,7 @@ def _delete_network_resources(
         for sub in subnets_c.list(project=project, region=region):
             if short_name(sub.network) == network:
                 ok = delete_with_retry(
-                    lambda nn=sub.name: _wait_region_op(
+                    lambda nn=sub.name: wait_for_region_op(
                         project,
                         region,
                         subnets_c.delete(project=project, region=region, subnetwork=nn).name,
@@ -182,7 +179,7 @@ def _delete_network_resources(
         for addr in addresses_c.list(project=project, region=region):
             if (addr.labels or {}).get("createdby") == "isvtest":
                 ok = delete_with_retry(
-                    lambda nn=addr.name: _wait_region_op(
+                    lambda nn=addr.name: wait_for_region_op(
                         project,
                         region,
                         addresses_c.delete(project=project, region=region, address=nn).name,
@@ -244,7 +241,7 @@ def main() -> int:
     }
 
     def _cleanup_local_keys() -> None:
-        # Runs regardless of cloud result (factory rule).
+        # Runs regardless of cloud result (vendor-API contract).
         if args.key_created.lower() == "true" and args.key_file and args.key_file != "none":
             for p in (args.key_file, args.key_file + ".pub"):
                 try:

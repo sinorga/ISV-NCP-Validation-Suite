@@ -19,7 +19,7 @@ Compute Engine divergences from the AWS oracle (per reviewed knowledge):
     the test network with sourceRanges + at least one Allowed entry
     with I_p_protocol set. Emit Firewall.name as ``security_group_id``.
   * Firewall ``allowed[]`` is REJECTED with HTTP 400 unless I_p_protocol
-    is set on every entry (factory override).
+    is set on every entry (vendor-API override).
   * Network / Subnetwork / Firewall protos have NO ``labels`` field —
     use only ``description`` for provenance.
 """
@@ -36,7 +36,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import (
+    resolve_project,
+    unique_suffix,
+    wait_for_global_op,
+    wait_for_region_op,
+)
 from common.errors import handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -52,11 +57,6 @@ def _list_region_zones(project: str, region: str) -> list[str]:
     client = compute_v1.RegionsClient()
     region_obj = client.get(project=project, region=region)
     return [url.rsplit("/", 1)[-1] for url in region_obj.zones or ()]
-
-
-def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 300) -> None:
-    client = compute_v1.RegionOperationsClient()
-    client.wait(project=project, region=region, operation=op_name, timeout=timeout)
 
 
 def _carve_subnet_cidrs(aggregate: str, count: int) -> list[str]:
@@ -150,7 +150,7 @@ def main() -> int:
                     "available_ips": max(0, net.num_addresses - _GCE_RESERVED_PER_SUBNET),
                 }
             )
-            _wait_region_op(project, args.region, op.name, timeout=300)
+            wait_for_region_op(project, args.region, op.name, timeout=300)
 
         # --- Project-scoped firewall (SG analog) ----------------------------
         op = firewalls.insert(

@@ -28,21 +28,17 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import (
+    resolve_project,
+    unique_suffix,
+    wait_for_global_op,
+    wait_for_region_op,
+)
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
 ISV_DESCRIPTION = "isvtest subnet_config — verified-reuse marker"
-
-
-def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 300) -> None:
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op_name,
-        timeout=timeout,
-    )
 
 
 def _list_region_zones(project: str, region: str) -> list[str]:
@@ -115,7 +111,7 @@ def main() -> int:
             )
             op = subnets_client.insert(project=project, region=args.region, subnetwork_resource=sub)
             created_subnets.append(sub_name)
-            _wait_region_op(project, args.region, op.name, timeout=300)
+            wait_for_region_op(project, args.region, op.name, timeout=300)
             subnets_emitted.append(
                 {
                     "subnet_id": sub_name,
@@ -153,7 +149,7 @@ def main() -> int:
     finally:
         for sub_name in created_subnets:
             delete_with_retry(
-                lambda n=sub_name: _wait_region_op(
+                lambda n=sub_name: wait_for_region_op(
                     project,
                     args.region,
                     subnets_client.delete(project=project, region=args.region, subnetwork=n).name,

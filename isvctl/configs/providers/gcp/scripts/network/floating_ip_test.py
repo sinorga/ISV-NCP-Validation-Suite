@@ -34,6 +34,7 @@ from common.compute import (
     resolve_project,
     unique_suffix,
     wait_for_global_op,
+    wait_for_region_op,
     wait_for_zonal_op,
 )
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
@@ -42,15 +43,6 @@ from google.cloud import compute_v1
 
 ISV_DESCRIPTION = "isvtest floating_ip — verified-reuse marker"
 DEFAULT_IMAGE = "projects/debian-cloud/global/images/family/debian-12"
-
-
-def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 300) -> None:
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op_name,
-        timeout=timeout,
-    )
 
 
 @handle_gcp_errors
@@ -104,7 +96,7 @@ def main() -> int:
             ),
         )
         cleanup.append(("subnet", subnet))
-        _wait_region_op(project, args.region, op.name, timeout=180)
+        wait_for_region_op(project, args.region, op.name, timeout=180)
 
         for n in (inst_a, inst_b):
             op = instances_c.insert(
@@ -150,7 +142,7 @@ def main() -> int:
             ),
         )
         cleanup.append(("address", addr_name))
-        _wait_region_op(project, args.region, op.name, timeout=180)
+        wait_for_region_op(project, args.region, op.name, timeout=180)
         addr_obj = addresses_c.get(project=project, region=args.region, address=addr_name)
         address_value = addr_obj.address
         result["tests"]["allocate_eip"] = {
@@ -265,7 +257,7 @@ def main() -> int:
                     )
                 elif kind == "address":
                     delete_with_retry(
-                        lambda nn=n: _wait_region_op(
+                        lambda nn=n: wait_for_region_op(
                             project,
                             args.region,
                             addresses_c.delete(project=project, region=args.region, address=nn).name,
@@ -275,7 +267,7 @@ def main() -> int:
                     )
                 elif kind == "subnet":
                     delete_with_retry(
-                        lambda nn=n: _wait_region_op(
+                        lambda nn=n: wait_for_region_op(
                             project,
                             args.region,
                             subnets_c.delete(project=project, region=args.region, subnetwork=nn).name,

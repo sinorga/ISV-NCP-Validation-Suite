@@ -31,6 +31,7 @@ from common.compute import (
     resolve_project,
     unique_suffix,
     wait_for_global_op,
+    wait_for_region_op,
     wait_for_zonal_op,
 )
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
@@ -85,12 +86,7 @@ def main() -> int:
             ),
         )
         cleanup.append(("subnet", subnet))
-        compute_v1.RegionOperationsClient().wait(
-            project=project,
-            region=args.region,
-            operation=op.name,
-            timeout=180,
-        )
+        wait_for_region_op(project, args.region, op.name, timeout=180)
 
         inst = compute_v1.Instance(
             name=instance,
@@ -162,10 +158,10 @@ def main() -> int:
                     )
                 elif kind == "subnet":
                     delete_with_retry(
-                        lambda nn=n: compute_v1.RegionOperationsClient().wait(
-                            project=project,
-                            region=args.region,
-                            operation=subnets_c.delete(project=project, region=args.region, subnetwork=nn).name,
+                        lambda nn=n: wait_for_region_op(
+                            project,
+                            args.region,
+                            subnets_c.delete(project=project, region=args.region, subnetwork=nn).name,
                             timeout=180,
                         ),
                         resource_desc=f"subnet {n}",

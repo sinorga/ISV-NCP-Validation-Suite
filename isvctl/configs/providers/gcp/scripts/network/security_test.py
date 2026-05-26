@@ -130,7 +130,7 @@ def main() -> int:
             ),
         )
         fw_read = firewalls.get(project=project, firewall=icmp_fw)
-        protos = {a.i_p_protocol for a in fw_read.allowed or ()}
+        protos = {a.I_p_protocol for a in fw_read.allowed or ()}
         result["tests"]["sg_denies_vpc_icmp"] = {
             "passed": "icmp" not in protos,
             "sg_id": icmp_fw,

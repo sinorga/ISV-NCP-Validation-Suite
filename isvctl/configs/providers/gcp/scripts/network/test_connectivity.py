@@ -10,7 +10,7 @@ Divergences from the AWS oracle:
   * IAM/SSM role is a no-op (Compute Engine attaches service accounts at
     launch; no SSM-equivalent role is required). Emit ``iam_profile=None``.
   * VPC validation: subnetwork.network and firewall.network must equal
-    the supplied network selfLink (exact tail match — factory rule).
+    the supplied network selfLink (exact tail match — vendor-API contract).
 """
 
 from __future__ import annotations

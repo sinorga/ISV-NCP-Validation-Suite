@@ -27,7 +27,12 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import (
+    resolve_project,
+    unique_suffix,
+    wait_for_global_op,
+    wait_for_region_op,
+)
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -69,12 +74,7 @@ def _insert_subnet(
         ),
     )
     cleanup.append(("subnet", name))
-    compute_v1.RegionOperationsClient().wait(
-        project=project,
-        region=region,
-        operation=op.name,
-        timeout=180,
-    )
+    wait_for_region_op(project, region, op.name, timeout=180)
 
 
 @handle_gcp_errors
@@ -122,8 +122,10 @@ def main() -> int:
                 ),
             ),
         )
-        wait_for_global_op(project, op.name, timeout=180)
+        # Stamp tracker BEFORE wait so a wait failure still triggers
+        # remove_peering on cleanup.
         peerings_added.append((name_a, peering_a))
+        wait_for_global_op(project, op.name, timeout=180)
         result["tests"]["create_peering"] = {"passed": True, "peering_id": peering_a}
 
         op = networks_c.add_peering(
@@ -137,8 +139,8 @@ def main() -> int:
                 ),
             ),
         )
-        wait_for_global_op(project, op.name, timeout=180)
         peerings_added.append((name_b, peering_b))
+        wait_for_global_op(project, op.name, timeout=180)
         result["tests"]["accept_peering"] = {"passed": True, "status": "ACTIVE"}
 
         # add_routes — wait for auto-exchanged routes to appear ACTIVE.
@@ -214,10 +216,10 @@ def main() -> int:
             try:
                 if kind == "subnet":
                     delete_with_retry(
-                        lambda nn=n: compute_v1.RegionOperationsClient().wait(
-                            project=project,
-                            region=args.region,
-                            operation=subnets_c.delete(project=project, region=args.region, subnetwork=nn).name,
+                        lambda nn=n: wait_for_region_op(
+                            project,
+                            args.region,
+                            subnets_c.delete(project=project, region=args.region, subnetwork=nn).name,
                             timeout=180,
                         ),
                         resource_desc=f"subnet {n}",

@@ -99,10 +99,13 @@ def main() -> int:
         _insert_firewall(project, network_name, fw_aux, "23", cleanup=cleanup_targets)
         result["tests"]["create_sg"] = {"passed": True, "sg_id": fw_main}
 
-        # read_sg — get firewall_main, count allowed[] as inbound.
+        # read_sg — get firewall_main, gate passed on name + description
+        # matching what we just inserted (AWS oracle gates on GroupName
+        # equality; sister contract).
         fw = firewalls.get(project=project, firewall=fw_main)
+        read_ok = fw.name == fw_main and fw.description == ISV_DESCRIPTION
         result["tests"]["read_sg"] = {
-            "passed": True,
+            "passed": read_ok,
             "name": fw.name,
             "description": fw.description,
             "vpc_id": network_name,
