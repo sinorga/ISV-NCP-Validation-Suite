@@ -36,7 +36,7 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest security_blocking — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str) -> None:
+def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
     op = compute_v1.NetworksClient().insert(
         project=project,
         network_resource=compute_v1.Network(
@@ -45,10 +45,13 @@ def _insert_network(project: str, name: str) -> None:
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(("network", name))
     wait_for_global_op(project, op.name, timeout=300)
 
 
 def _insert_firewall(project: str, fw: compute_v1.Firewall) -> None:
+    # Caller is responsible for stamping the cleanup tracker BEFORE invoking
+    # this helper so the partial-create graph survives a wait failure.
     op = compute_v1.FirewallsClient().insert(project=project, firewall_resource=fw)
     wait_for_global_op(project, op.name, timeout=180)
 
@@ -70,8 +73,7 @@ def main() -> int:
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
     try:
-        _insert_network(project, network_name)
-        cleanup.append(("network", network_name))
+        _insert_network(project, network_name, cleanup=cleanup)
 
         # sg_default_deny_inbound — list firewalls; assert no INGRESS rule.
         rules = list(

@@ -90,8 +90,8 @@ def main() -> int:
                 auto_create_subnetworks=False,
             ),
         )
-        wait_for_global_op(project, op.name, timeout=300)
         cleanup.append(("network", network))
+        wait_for_global_op(project, op.name, timeout=300)
         op = subnets_c.insert(
             project=project,
             region=args.region,
@@ -103,8 +103,8 @@ def main() -> int:
                 region=args.region,
             ),
         )
-        _wait_region_op(project, args.region, op.name, timeout=180)
         cleanup.append(("subnet", subnet))
+        _wait_region_op(project, args.region, op.name, timeout=180)
 
         for n in (inst_a, inst_b):
             op = instances_c.insert(
@@ -149,8 +149,8 @@ def main() -> int:
                 labels={"createdby": "isvtest"},
             ),
         )
-        _wait_region_op(project, args.region, op.name, timeout=180)
         cleanup.append(("address", addr_name))
+        _wait_region_op(project, args.region, op.name, timeout=180)
         addr_obj = addresses_c.get(project=project, region=args.region, address=addr_name)
         address_value = addr_obj.address
         result["tests"]["allocate_eip"] = {

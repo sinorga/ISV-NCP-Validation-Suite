@@ -35,7 +35,7 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest peering — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str) -> None:
+def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
     op = compute_v1.NetworksClient().insert(
         project=project,
         network_resource=compute_v1.Network(
@@ -44,10 +44,19 @@ def _insert_network(project: str, name: str) -> None:
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(("network", name))
     wait_for_global_op(project, op.name, timeout=300)
 
 
-def _insert_subnet(project: str, region: str, network: str, name: str, cidr: str) -> None:
+def _insert_subnet(
+    project: str,
+    region: str,
+    network: str,
+    name: str,
+    cidr: str,
+    *,
+    cleanup: list[tuple[str, str]],
+) -> None:
     op = compute_v1.SubnetworksClient().insert(
         project=project,
         region=region,
@@ -59,6 +68,7 @@ def _insert_subnet(project: str, region: str, network: str, name: str, cidr: str
             region=region,
         ),
     )
+    cleanup.append(("subnet", name))
     compute_v1.RegionOperationsClient().wait(
         project=project,
         region=region,
@@ -93,16 +103,12 @@ def main() -> int:
     cleanup: list[tuple[str, str]] = []
     peerings_added: list[tuple[str, str]] = []  # (network, peering_name)
     try:
-        _insert_network(project, name_a)
-        cleanup.append(("network", name_a))
-        _insert_subnet(project, args.region, name_a, sub_a, cidr_a)
-        cleanup.append(("subnet", sub_a))
+        _insert_network(project, name_a, cleanup=cleanup)
+        _insert_subnet(project, args.region, name_a, sub_a, cidr_a, cleanup=cleanup)
         result["tests"]["create_vpc_a"] = {"passed": True, "vpc_id": name_a}
 
-        _insert_network(project, name_b)
-        cleanup.append(("network", name_b))
-        _insert_subnet(project, args.region, name_b, sub_b, cidr_b)
-        cleanup.append(("subnet", sub_b))
+        _insert_network(project, name_b, cleanup=cleanup)
+        _insert_subnet(project, args.region, name_b, sub_b, cidr_b, cleanup=cleanup)
         result["tests"]["create_vpc_b"] = {"passed": True, "vpc_id": name_b}
 
         op = networks_c.add_peering(
@@ -192,15 +198,18 @@ def main() -> int:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for net, peering in peerings_added:
-            try:
-                op = networks_c.remove_peering(
-                    project=project,
-                    network=net,
-                    networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=peering),
-                )
-                wait_for_global_op(project, op.name, timeout=180)
-            except Exception:
-                pass
+            delete_with_retry(
+                lambda n=net, p=peering: wait_for_global_op(
+                    project,
+                    networks_c.remove_peering(
+                        project=project,
+                        network=n,
+                        networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=p),
+                    ).name,
+                    timeout=180,
+                ),
+                resource_desc=f"peering {peering} from {net}",
+            )
         for kind, n in reversed(cleanup):
             try:
                 if kind == "subnet":

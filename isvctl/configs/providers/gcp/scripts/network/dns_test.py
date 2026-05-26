@@ -65,6 +65,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup_zone = False
+    network_created = False
     try:
         op = networks_c.insert(
             project=project,
@@ -74,6 +75,7 @@ def main() -> int:
                 auto_create_subnetworks=False,
             ),
         )
+        network_created = True
         wait_for_global_op(project, op.name, timeout=300)
         result["tests"]["create_vpc_with_dns"] = {"passed": True, "vpc_id": network}
 
@@ -168,14 +170,15 @@ def main() -> int:
                 z.delete()
             except Exception:
                 pass
-        delete_with_retry(
-            lambda: wait_for_global_op(
-                project,
-                networks_c.delete(project=project, network=network).name,
-                timeout=180,
-            ),
-            resource_desc=f"network {network}",
-        )
+        if network_created:
+            delete_with_retry(
+                lambda: wait_for_global_op(
+                    project,
+                    networks_c.delete(project=project, network=network).name,
+                    timeout=180,
+                ),
+                resource_desc=f"network {network}",
+            )
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

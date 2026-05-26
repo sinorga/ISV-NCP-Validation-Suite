@@ -35,7 +35,7 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest sg_crud — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str) -> None:
+def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
     op = compute_v1.NetworksClient().insert(
         project=project,
         network_resource=compute_v1.Network(
@@ -44,10 +44,18 @@ def _insert_network(project: str, name: str) -> None:
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(("network", name))
     wait_for_global_op(project, op.name, timeout=300)
 
 
-def _insert_firewall(project: str, network: str, name: str, port: str) -> None:
+def _insert_firewall(
+    project: str,
+    network: str,
+    name: str,
+    port: str,
+    *,
+    cleanup: list[tuple[str, str]],
+) -> None:
     op = compute_v1.FirewallsClient().insert(
         project=project,
         firewall_resource=compute_v1.Firewall(
@@ -59,6 +67,7 @@ def _insert_firewall(project: str, network: str, name: str, port: str) -> None:
             allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=[port])],
         ),
     )
+    cleanup.append(("firewall", name))
     wait_for_global_op(project, op.name, timeout=180)
 
 
@@ -82,15 +91,12 @@ def main() -> int:
     cleanup_targets: list[tuple[str, str]] = []  # (kind, name)
 
     try:
-        _insert_network(project, network_name)
-        cleanup_targets.append(("network", network_name))
+        _insert_network(project, network_name, cleanup=cleanup_targets)
         result["tests"]["create_vpc"] = {"passed": True, "vpc_id": network_name}
 
         # create_sg → insert BOTH firewall_main and firewall_aux.
-        _insert_firewall(project, network_name, fw_main, "22")
-        cleanup_targets.append(("firewall", fw_main))
-        _insert_firewall(project, network_name, fw_aux, "23")
-        cleanup_targets.append(("firewall", fw_aux))
+        _insert_firewall(project, network_name, fw_main, "22", cleanup=cleanup_targets)
+        _insert_firewall(project, network_name, fw_aux, "23", cleanup=cleanup_targets)
         result["tests"]["create_sg"] = {"passed": True, "sg_id": fw_main}
 
         # read_sg — get firewall_main, count allowed[] as inbound.

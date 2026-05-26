@@ -71,8 +71,8 @@ def main() -> int:
                 auto_create_subnetworks=False,
             ),
         )
-        wait_for_global_op(project, op.name, timeout=300)
         cleanup.append(("network", network))
+        wait_for_global_op(project, op.name, timeout=300)
         op = subnets_c.insert(
             project=project,
             region=args.region,
@@ -84,13 +84,13 @@ def main() -> int:
                 region=args.region,
             ),
         )
+        cleanup.append(("subnet", subnet))
         compute_v1.RegionOperationsClient().wait(
             project=project,
             region=args.region,
             operation=op.name,
             timeout=180,
         )
-        cleanup.append(("subnet", subnet))
 
         inst = compute_v1.Instance(
             name=instance,
@@ -118,6 +118,8 @@ def main() -> int:
         cleanup.append(("instance", instance))
         wait_for_zonal_op(project, zone, op.name, timeout=600)
         poll_instance_state(project, zone, instance, target_canonical="running", timeout=600)
+        # Note: tracker stamped BEFORE the wait above per partial-state-
+        # recovery contract.
         result["tests"]["create_instance"] = {"passed": True, "instance_id": instance}
 
         obj = instances_c.get(project=project, zone=zone, instance=instance)

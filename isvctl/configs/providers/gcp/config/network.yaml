@@ -138,7 +138,7 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--aspect"
           - "hardware_faults"
-        timeout: 300
+        timeout: 120
 
       - name: sdn_latency_perf_logging
         phase: test

@@ -67,112 +67,15 @@ def _carve_subnet_cidrs(aggregate: str, count: int) -> list[str]:
     return [str(s) for s in subs[:count]]
 
 
-def create_network(
-    project: str,
-    network_name: str,
-    cidr: str,
-    region: str,
-    firewall_name: str,
-) -> dict[str, Any]:
-    """Create the network + subnets + firewall.
-
-    Stamps `network_created=True` BEFORE the network wait completes so the
-    caller (and downstream teardown) can clean up partial state. On any
-    failure after the network insert succeeds, the partial graph (network
-    + whatever subnets were created + maybe firewall) is left for teardown
-    to enumerate via aggregated/list filters — this stub does not best-
-    effort delete what it just created because the teardown step is the
-    canonical cleanup surface.
-    """
-    result: dict[str, Any] = {
-        "success": False,
-        "platform": "network",
-        "network_id": network_name,
-        "cidr": cidr,
-        "subnets": [],
-        "security_group_id": None,
-        "dhcp_options": None,
-        "network_created": False,
-    }
-
-    networks = compute_v1.NetworksClient()
-    subnets = compute_v1.SubnetworksClient()
-    firewalls = compute_v1.FirewallsClient()
-
-    # --- Custom-mode network -------------------------------------------------
-    # Stamp network_created BEFORE the async wait so the caller-side
-    # partial-state-recovery contract holds even if the wait raises.
-    network = compute_v1.Network(
-        name=network_name,
-        description=ISV_DESCRIPTION,
-        auto_create_subnetworks=False,
-        routing_config=compute_v1.NetworkRoutingConfig(routing_mode="REGIONAL"),
-    )
-    op = networks.insert(project=project, network_resource=network)
-    result["network_created"] = True
-    wait_for_global_op(project, op.name, timeout=300)
-
-    # --- Subnetworks (two minimum) -------------------------------------------
-    zones = _list_region_zones(project, region)
-    if len(zones) < 2:
-        raise RuntimeError(f"region {region} reports fewer than 2 zones: {zones}")
-
-    subnet_cidrs = _carve_subnet_cidrs(cidr, 2)
-    for i, sub_cidr in enumerate(subnet_cidrs):
-        sub_name = f"{network_name}-sub{i}"
-        sub = compute_v1.Subnetwork(
-            name=sub_name,
-            description=ISV_DESCRIPTION,
-            ip_cidr_range=sub_cidr,
-            network=f"projects/{project}/global/networks/{network_name}",
-            region=region,
-        )
-        op = subnets.insert(project=project, region=region, subnetwork_resource=sub)
-        net = ipaddress.ip_network(sub_cidr)
-        # Append the subnet record BEFORE the wait so the caller knows the
-        # subnet was created even if the wait raises.
-        result["subnets"].append(
-            {
-                "subnet_id": sub_name,
-                "cidr": sub_cidr,
-                "az": zones[i % len(zones)],
-                "auto_assign_public_ip": False,
-                "available_ips": max(0, net.num_addresses - _GCE_RESERVED_PER_SUBNET),
-            }
-        )
-        _wait_region_op(project, region, op.name, timeout=300)
-
-    # --- Project-scoped firewall (SG analog) ---------------------------------
-    fw = compute_v1.Firewall(
-        name=firewall_name,
-        description=ISV_DESCRIPTION,
-        network=f"projects/{project}/global/networks/{network_name}",
-        direction="INGRESS",
-        source_ranges=["0.0.0.0/0"],
-        allowed=[
-            compute_v1.Allowed(I_p_protocol="tcp", ports=["22"]),
-            compute_v1.Allowed(I_p_protocol="icmp"),
-        ],
-        target_tags=[PROVENANCE_TAG],
-    )
-    op = firewalls.insert(project=project, firewall_resource=fw)
-    result["security_group_id"] = firewall_name
-    wait_for_global_op(project, op.name, timeout=300)
-
-    # --- DHCP options (synthesised — no API) ---------------------------------
-    result["dhcp_options"] = {
-        "dhcp_options_id": network_name,
-        "domain_name": None,
-        "domain_name_servers": ["169.254.169.254"],
-        "ntp_servers": [],
-    }
-
-    result["success"] = True
-    return result
-
-
 @handle_gcp_errors
 def main() -> int:
+    """Create-network is flattened into main() so the result dict is the
+    single source of truth — every mutation (`network_created=True`,
+    `subnets.append(...)`, `security_group_id=...`) happens on the outer
+    `result` dict BEFORE the corresponding async wait. If a wait raises,
+    the partial-state JSON still surfaces what was created so teardown's
+    forwarded `--network-created` / `--vpc-id` args can drive cleanup.
+    """
     parser = argparse.ArgumentParser(description="Create Compute Engine VPC + subnets + firewall")
     parser.add_argument("--name", default="isv-shared-vpc", help="Network name prefix")
     parser.add_argument("--region", default=os.environ.get("GCP_REGION", "us-central1"))
@@ -181,37 +84,110 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    name = unique_suffix(args.name)
+    network_name = unique_suffix(args.name)
     firewall_name = unique_suffix(f"{args.name}-fw")
 
-    # The partial-state dict starts pre-stamped with the names we constructed
-    # so that even an early exception emits a JSON payload teardown can act on
-    # (network_id present + network_created flipped to True as soon as the
-    # network insert is dispatched).
     result: dict[str, Any] = {
         "success": False,
         "platform": "network",
-        "network_id": name,
+        "network_id": network_name,
         "cidr": args.cidr,
         "subnets": [],
         "security_group_id": None,
         "dhcp_options": None,
         "network_created": False,
+        "region": args.region,
+        "name": args.name,
     }
+
+    networks = compute_v1.NetworksClient()
+    subnets_client = compute_v1.SubnetworksClient()
+    firewalls = compute_v1.FirewallsClient()
+
     try:
-        result = create_network(project, name, args.cidr, args.region, firewall_name)
+        # --- Custom-mode network --------------------------------------------
+        # Stamp network_created BEFORE the wait — partial-state-recovery
+        # contract: teardown reads `network_created` and `network_id` from
+        # whatever JSON THIS run emits (including a partial-failure JSON).
+        op = networks.insert(
+            project=project,
+            network_resource=compute_v1.Network(
+                name=network_name,
+                description=ISV_DESCRIPTION,
+                auto_create_subnetworks=False,
+                routing_config=compute_v1.NetworkRoutingConfig(routing_mode="REGIONAL"),
+            ),
+        )
+        result["network_created"] = True
+        wait_for_global_op(project, op.name, timeout=300)
+
+        # --- Subnetworks (two minimum) --------------------------------------
+        zones = _list_region_zones(project, args.region)
+        if len(zones) < 2:
+            raise RuntimeError(f"region {args.region} reports fewer than 2 zones: {zones}")
+
+        for i, sub_cidr in enumerate(_carve_subnet_cidrs(args.cidr, 2)):
+            sub_name = f"{network_name}-sub{i}"
+            op = subnets_client.insert(
+                project=project,
+                region=args.region,
+                subnetwork_resource=compute_v1.Subnetwork(
+                    name=sub_name,
+                    description=ISV_DESCRIPTION,
+                    ip_cidr_range=sub_cidr,
+                    network=f"projects/{project}/global/networks/{network_name}",
+                    region=args.region,
+                ),
+            )
+            # Append BEFORE the wait — same partial-state-recovery argument.
+            net = ipaddress.ip_network(sub_cidr)
+            result["subnets"].append(
+                {
+                    "subnet_id": sub_name,
+                    "cidr": sub_cidr,
+                    "az": zones[i % len(zones)],
+                    "auto_assign_public_ip": False,
+                    "available_ips": max(0, net.num_addresses - _GCE_RESERVED_PER_SUBNET),
+                }
+            )
+            _wait_region_op(project, args.region, op.name, timeout=300)
+
+        # --- Project-scoped firewall (SG analog) ----------------------------
+        op = firewalls.insert(
+            project=project,
+            firewall_resource=compute_v1.Firewall(
+                name=firewall_name,
+                description=ISV_DESCRIPTION,
+                network=f"projects/{project}/global/networks/{network_name}",
+                direction="INGRESS",
+                source_ranges=["0.0.0.0/0"],
+                allowed=[
+                    compute_v1.Allowed(I_p_protocol="tcp", ports=["22"]),
+                    compute_v1.Allowed(I_p_protocol="icmp"),
+                ],
+                target_tags=[PROVENANCE_TAG],
+            ),
+        )
+        # Stamp firewall id BEFORE the wait so teardown's enumerate-by-network
+        # filter has the explicit name to lookup if the wait raises.
+        result["security_group_id"] = firewall_name
+        wait_for_global_op(project, op.name, timeout=300)
+
+        # --- DHCP options (synthesised — no API) ----------------------------
+        result["dhcp_options"] = {
+            "dhcp_options_id": network_name,
+            "domain_name": None,
+            "domain_name_servers": ["169.254.169.254"],
+            "ntp_servers": [],
+        }
+        result["success"] = True
     except gax.AlreadyExists as e:
         result["error_type"] = "api_error"
         result["error"] = f"resource already exists (verified-reuse not implemented for create_network): {e}"
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        # Partial-rollback path: result["network_created"] may be True and
-        # result["subnets"] may be non-empty even though we never reached
-        # success=True. Teardown reads these forwarded fields and cleans up.
-        et, em = ("api_error", str(e)) if isinstance(e, gax.GoogleAPICallError) else ("unknown_error", str(e))
+        et = "api_error" if isinstance(e, gax.GoogleAPICallError) else "unknown_error"
         result["error_type"] = et
-        result["error"] = em
-    result["region"] = args.region
-    result["name"] = args.name
+        result["error"] = str(e)
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

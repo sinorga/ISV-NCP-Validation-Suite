@@ -50,7 +50,7 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest sg_scoping — verified-reuse marker"
 
 
-def _insert_network(project: str, name: str) -> None:
+def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
     op = compute_v1.NetworksClient().insert(
         project=project,
         network_resource=compute_v1.Network(
@@ -59,10 +59,19 @@ def _insert_network(project: str, name: str) -> None:
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(("network", name))
     wait_for_global_op(project, op.name, timeout=300)
 
 
-def _insert_subnet(project: str, region: str, network: str, name: str, cidr: str) -> None:
+def _insert_subnet(
+    project: str,
+    region: str,
+    network: str,
+    name: str,
+    cidr: str,
+    *,
+    cleanup: list[tuple[str, str]],
+) -> None:
     op = compute_v1.SubnetworksClient().insert(
         project=project,
         region=region,
@@ -74,6 +83,7 @@ def _insert_subnet(project: str, region: str, network: str, name: str, cidr: str
             region=region,
         ),
     )
+    cleanup.append(("subnet", name))
     compute_v1.RegionOperationsClient().wait(
         project=project,
         region=region,
@@ -291,12 +301,9 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
     try:
-        _insert_network(project, network)
-        cleanup.append(("network", network))
-        _insert_subnet(project, region, network, sub_a, cidr_a)
-        cleanup.append(("subnet", sub_a))
-        _insert_subnet(project, region, network, sub_b, cidr_b)
-        cleanup.append(("subnet", sub_b))
+        _insert_network(project, network, cleanup=cleanup)
+        _insert_subnet(project, region, network, sub_a, cidr_a, cleanup=cleanup)
+        _insert_subnet(project, region, network, sub_b, cidr_b, cleanup=cleanup)
         op = firewalls.insert(
             project=project,
             firewall_resource=compute_v1.Firewall(
@@ -308,8 +315,8 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
                 allowed=[compute_v1.Allowed(I_p_protocol="tcp", ports=["22"])],
             ),
         )
-        wait_for_global_op(project, op.name, timeout=180)
         cleanup.append(("firewall", fw))
+        wait_for_global_op(project, op.name, timeout=180)
         fw_obj = firewalls.get(project=project, firewall=fw)
         ranges = list(fw_obj.source_ranges or ())
         result["tests"]["create_sg"] = {

@@ -41,7 +41,16 @@ def _wait_region_op(project: str, region: str, op_name: str, *, timeout: int = 3
     )
 
 
-def _create_pair(project: str, region: str, label: str, cidr: str) -> tuple[str, str]:
+def _create_pair(
+    project: str,
+    region: str,
+    label: str,
+    cidr: str,
+    *,
+    cleanup: list[tuple[str, str]],
+) -> tuple[str, str]:
+    """Insert network + subnetwork. Cleanup tracker stamped BEFORE each wait
+    so a partial-create graph survives a wait failure."""
     net_name = unique_suffix(f"isv-{label}")
     sub_name = unique_suffix(f"isv-{label}-sn")
     op = compute_v1.NetworksClient().insert(
@@ -52,6 +61,7 @@ def _create_pair(project: str, region: str, label: str, cidr: str) -> tuple[str,
             auto_create_subnetworks=False,
         ),
     )
+    cleanup.append(("network", net_name))
     wait_for_global_op(project, op.name, timeout=300)
     op = compute_v1.SubnetworksClient().insert(
         project=project,
@@ -64,6 +74,7 @@ def _create_pair(project: str, region: str, label: str, cidr: str) -> tuple[str,
             region=region,
         ),
     )
+    cleanup.append(("subnet", sub_name))
     _wait_region_op(project, region, op.name, timeout=300)
     return net_name, sub_name
 
@@ -87,9 +98,7 @@ def main() -> int:
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
     try:
-        net_c, sub_c = _create_pair(project, args.region, "byo-c", custom_sub_cidr)
-        cleanup.append(("subnet", sub_c))
-        cleanup.append(("network", net_c))
+        net_c, sub_c = _create_pair(project, args.region, "byo-c", custom_sub_cidr, cleanup=cleanup)
         result["tests"]["custom_cidr_create"] = {
             "passed": True,
             "vpc_id": net_c,
@@ -104,9 +113,7 @@ def main() -> int:
             "state": "READY",
         }
 
-        net_s, sub_s = _create_pair(project, args.region, "byo-s", standard_sub_cidr)
-        cleanup.append(("subnet", sub_s))
-        cleanup.append(("network", net_s))
+        net_s, _ = _create_pair(project, args.region, "byo-s", standard_sub_cidr, cleanup=cleanup)
         result["tests"]["standard_cidr_create"] = {
             "passed": True,
             "vpc_id": net_s,
