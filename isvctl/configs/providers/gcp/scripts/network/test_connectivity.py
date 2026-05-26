@@ -45,6 +45,10 @@ from google.cloud import compute_v1
 ISV_DESCRIPTION = "isvtest connectivity — verified-reuse marker"
 DEFAULT_IMAGE = "projects/debian-cloud/global/images/family/debian-12"
 SSH_USER = "isvtest"
+# Must match create_vpc.py PROVENANCE_TAG — create_vpc emits a firewall
+# whose `target_tags` is gated on this tag, so probe VMs MUST carry it
+# for the SSH-22 ingress rule to apply. Untagged VMs are firewall-blocked
+# and wait_for_ssh times out (run 28492c99 evidence).
 
 
 def _validate_vpc(
@@ -106,6 +110,7 @@ def _build_instance(
         name=name,
         description=ISV_DESCRIPTION,
         machine_type=f"zones/{zone}/machineTypes/e2-small",
+        tags=compute_v1.Tags(items=["isvtest"]),
         disks=[
             compute_v1.AttachedDisk(
                 boot=True,
