@@ -11,7 +11,7 @@ Divergences from the AWS oracle:
     containment math).
   * No DHCP options API — emit a synthesised dhcp_options object with
     domain_name_servers=['169.254.169.254'] (metadata-server internal
-    DNS).
+    DNS) and domain_name="" (orchestrator schema rejects null).
   * Subnets have no auto_assign_public_ip attribute — emit False;
     the provider config sets VpcIpConfigCheck.auto_assign_ip_mode=instance
     so the validator accepts that target-shape honestly.
@@ -84,7 +84,10 @@ def main() -> int:
             idx += 1
         result["dhcp_options"] = {
             "dhcp_options_id": network,
-            "domain_name": None,
+            # Compute Engine has no DHCP options API; emit "" rather than
+            # null because the orchestrator's vpc_ip_config schema requires
+            # dhcp_options.domain_name to be a string.
+            "domain_name": "",
             "domain_name_servers": ["169.254.169.254"],
             "ntp_servers": [],
         }
