@@ -23,6 +23,7 @@ import argparse
 import json
 import os
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -113,15 +114,32 @@ def main() -> int:
             "domain": domain,
         }
 
-        # Insert A record.
+        # Insert A record. Gate `passed` on the Cloud DNS change reaching
+        # `status == "done"` (poll up to 60s) AND a list-resource-record-sets
+        # readback containing the inserted name — `changes.create()` returns
+        # before the change has propagated and a fail-to-propagate path
+        # MUST not read as PASS.
         changes = zone.changes()
         rrs = zone.resource_record_set(record_fqdn, "A", 300, [target_ip])
         changes.add_record_set(rrs)
         changes.create()
+        change_done = False
+        for _ in range(20):  # ~60s budget at 3s/iteration
+            try:
+                changes.reload()
+            except Exception:
+                break
+            if (getattr(changes, "status", "") or "").lower() == "done":
+                change_done = True
+                break
+            time.sleep(3)
+        record_present = any(r.name == record_fqdn and r.record_type == "A" for r in zone.list_resource_record_sets())
         result["tests"]["create_dns_record"] = {
-            "passed": True,
+            "passed": change_done and record_present,
             "fqdn": record_fqdn,
             "target_ip": target_ip,
+            "change_status": getattr(changes, "status", None),
+            "record_present": record_present,
         }
 
         result["tests"]["verify_dns_settings"] = {

@@ -228,6 +228,10 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
             "message": f"untagged VM {name_other} does not carry firewall targetTag {tag}",
             "observed_tags": sorted(other_tags),
         }
+        # Recompute INSIDE try — if try raises before any test was written,
+        # success stays False (default). Only the cleanup gate is AND-ed in
+        # after finally.
+        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
@@ -284,8 +288,11 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         "passed": not cleanup_errors,
         "errors": cleanup_errors,
     }
-    # success requires every subtest including cleanup to be passed.
-    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+    # AND-in the cleanup gate after finally. result["success"] was set
+    # inside try to all(tests.values()); if try raised before any subtest
+    # was written, success is False (default). Either way, cleanup
+    # errors flip success to False.
+    result["success"] = result["success"] and not cleanup_errors
     return result
 
 
@@ -335,6 +342,7 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
             "passed": cidr_b not in ranges,
             "message": f"firewall sourceRanges do not contain subnet B CIDR ({cidr_b})",
         }
+        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
@@ -379,7 +387,9 @@ def _scope_subnet(project: str, region: str) -> dict[str, Any]:
         "passed": not cleanup_errors,
         "errors": cleanup_errors,
     }
-    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+    # AND-in the cleanup gate after finally — success was computed inside
+    # try; a try-raise leaves it at False.
+    result["success"] = result["success"] and not cleanup_errors
     return result
 
 
@@ -631,6 +641,7 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
             "vm": name_other,
             "service_accounts": o_sa_emails,
         }
+        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"] = "api_error" if isinstance(e, gax.GoogleAPICallError) else "unknown_error"
         result["error"] = str(e)
@@ -720,7 +731,9 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
         "passed": not blocking_errors,
         "errors": cleanup_errors,
     }
-    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+    # AND-in the cleanup gate; success was set inside try (False if try
+    # raised before any subtest was written).
+    result["success"] = result["success"] and not blocking_errors
     return result
 
 
