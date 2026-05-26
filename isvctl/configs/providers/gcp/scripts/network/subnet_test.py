@@ -127,6 +127,12 @@ def main() -> int:
             "count": len(subnets_emitted),
             "subnets": subnets_emitted,
         }
+        # SubnetConfigCheck reads `step_output.subnets` at the TOP level
+        # (see isvtest/src/isvtest/validations/network.py SubnetConfigCheck.run).
+        # The AWS oracle emits both `tests.create_subnets.subnets` and
+        # top-level `subnets`; mirror that here so the validator sees the
+        # 4-subnet inventory.
+        result["subnets"] = subnets_emitted
 
         # az_distribution
         distinct_azs = {s["az"] for s in subnets_emitted}
