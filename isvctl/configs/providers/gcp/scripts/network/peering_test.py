@@ -9,9 +9,15 @@ Divergences from the AWS oracle:
   * Peering is bilateral and symmetric — both sides call add_peering;
     there is no separate accept handshake.
   * Routes auto-exchange when exchange_subnet_routes=True (default).
-  * NetworksClient.list_peering_routes REQUIRES region= keyword (API
-    requirement). Auto-exchanged route propagation lags peering ACTIVE
-    by 30-90s; poll on 5s/120s with state=='ACTIVE' gate.
+  * NetworksClient.list_peering_routes REQUIRES region=, peering_name=
+    AND direction= (per REST contract at
+    cloud.google.com/compute/docs/reference/rest/v1/networks/listPeeringRoutes).
+    Omitting any of them yields HTTP 400 "Required field ... not specified"
+    which the GoogleAPICallError catch silently swallows, leaving the
+    route count at 0 forever. We gate on direction=INCOMING (routes the
+    peer exported to us) since that's what proves the subnet route
+    exchange actually crossed the peering boundary. Auto-exchanged route
+    propagation lags peering ACTIVE by 30-90s; poll on 5s/180s.
 """
 
 from __future__ import annotations
@@ -144,8 +150,12 @@ def main() -> int:
         result["tests"]["accept_peering"] = {"passed": True, "status": "ACTIVE"}
 
         # add_routes — wait for auto-exchanged routes to appear ACTIVE.
-        deadline = time.monotonic() + 120
+        # peering_name is required by listPeeringRoutes; omitting it
+        # returns HTTP 400 INVALID_ARGUMENT which would be silently
+        # swallowed by the GoogleAPICallError catch below.
+        deadline = time.monotonic() + 180
         a_routes = b_routes = 0
+        last_error: str | None = None
         while time.monotonic() < deadline:
             try:
                 a_iter = list(
@@ -154,6 +164,8 @@ def main() -> int:
                             project=project,
                             network=name_a,
                             region=args.region,
+                            peering_name=peering_a,
+                            direction="INCOMING",
                         ),
                     )
                 )
@@ -163,6 +175,8 @@ def main() -> int:
                             project=project,
                             network=name_b,
                             region=args.region,
+                            peering_name=peering_b,
+                            direction="INCOMING",
                         ),
                     )
                 )
@@ -170,18 +184,24 @@ def main() -> int:
                 # route presence after the parent NetworkPeering ACTIVE check.
                 a_routes = len(a_iter)
                 b_routes = len(b_iter)
-            except gax.GoogleAPICallError:
+                last_error = None
+            except gax.GoogleAPICallError as e:
                 a_routes = b_routes = 0
+                last_error = str(e)
             if a_routes >= 1 and b_routes >= 1:
                 break
             time.sleep(5)
 
-        result["tests"]["add_routes"] = {
-            "passed": a_routes >= 1 and b_routes >= 1,
+        add_routes_passed = a_routes >= 1 and b_routes >= 1
+        add_routes_result: dict[str, Any] = {
+            "passed": add_routes_passed,
             "vpc_a_routes": a_routes,
             "vpc_b_routes": b_routes,
             "message": "peering subnet routes auto-exchanged",
         }
+        if not add_routes_passed:
+            add_routes_result["error"] = last_error or f"no exchanged routes after 180s (a={a_routes}, b={b_routes})"
+        result["tests"]["add_routes"] = add_routes_result
 
         # peering_active — both networks should show ACTIVE peering state.
         a_net = networks_c.get(project=project, network=name_a)
