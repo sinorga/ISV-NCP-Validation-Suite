@@ -63,8 +63,23 @@ def _insert_network(
 
 def test_create_vpc(project: str, name: str, tracker: dict[str, bool]) -> dict[str, Any]:
     """Track create-success BEFORE the wait so a failing wait still triggers
-    teardown of the accepted-but-not-DONE network."""
+    teardown of the accepted-but-not-DONE network.
+
+    The CRUD test reuses a stable, RUN_ID-derived name; a prior failed
+    attempt with the same RUN_ID can leave the network around and turn the
+    next insert into a 409. Pre-clean (NotFound-tolerant) before insert so
+    the live gate is not blocked by leftovers from an earlier failure.
+    """
     result: dict[str, Any] = {"passed": False, "vpc_id": name}
+    networks = compute_v1.NetworksClient()
+    delete_with_retry(
+        lambda: wait_for_global_op(
+            project,
+            networks.delete(project=project, network=name).name,
+            timeout=180,
+        ),
+        resource_desc=f"pre-clean stale network {name}",
+    )
     try:
         _insert_network(project, name, on_dispatch=lambda: tracker.__setitem__("created", True))
         result["passed"] = True
@@ -208,7 +223,7 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    name = unique_suffix("isv-crud")
+    name = unique_suffix("isv-crud-iso")
 
     result: dict[str, Any] = {
         "success": False,

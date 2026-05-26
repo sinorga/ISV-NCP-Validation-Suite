@@ -62,7 +62,7 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    network_name = unique_suffix("isv-subnets")
+    network_name = unique_suffix("isv-subnets-iso")
     subnet_cidrs = _carve(args.cidr, args.subnet_count)
 
     networks = compute_v1.NetworksClient()
@@ -79,6 +79,17 @@ def main() -> int:
     created_subnets: list[str] = []
     network_created = False
     try:
+        # Pre-clean any leftover network with the same RUN_ID-derived name
+        # (e.g. from a prior failed run, or a parallel worker that crashed
+        # before its own teardown). NotFound-tolerant via delete_with_retry.
+        delete_with_retry(
+            lambda: wait_for_global_op(
+                project,
+                networks.delete(project=project, network=network_name).name,
+                timeout=180,
+            ),
+            resource_desc=f"pre-clean stale network {network_name}",
+        )
         # Setup network. Stamp the tracker BEFORE the wait so a wait failure
         # still surfaces the partial-create graph to the cleanup finally.
         op = networks.insert(
@@ -127,6 +138,10 @@ def main() -> int:
             "count": len(subnets_emitted),
             "subnets": subnets_emitted,
         }
+        # SubnetConfigCheck reads top-level `subnets` (validator at
+        # isvtest/.../network.py:124). Mirror the per-test list so the
+        # validator's count + az fields resolve from this step output.
+        result["subnets"] = subnets_emitted
 
         # az_distribution
         distinct_azs = {s["az"] for s in subnets_emitted}
