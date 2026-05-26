@@ -57,6 +57,22 @@ def _cidrs_overlap(a: str, b: str) -> bool:
         return False
 
 
+def _is_auto_route(route: compute_v1.Route) -> bool:
+    """Filter GCE-auto-created routes out of cross-route checks. Custom-mode
+    networks ship with a `default-route-<hex>` 0.0.0.0/0 → default-internet-
+    gateway entry that overlaps every customer CIDR — comparing against it
+    would always trigger a false 'cross route' finding on greenfield runs.
+    Mirrors teardown.py:_is_auto_route."""
+    name = route.name or ""
+    if name.startswith("default-route-"):
+        return True
+    if route.next_hop_network or route.next_hop_gateway:
+        return True
+    if (route.dest_range or "") == "0.0.0.0/0":
+        return True
+    return False
+
+
 @handle_gcp_errors
 def main() -> int:
     parser = argparse.ArgumentParser(description="Compute Engine VPC isolation")
@@ -99,22 +115,30 @@ def main() -> int:
             "peerings_b": sorted(peers_b),
         }
 
-        # no_cross_routes_a — list routes on network A; assert no destRange overlaps cidr_b.
+        # no_cross_routes_a — list routes on network A; assert no
+        # CUSTOMER-FACING destRange overlaps cidr_b. Auto-routes
+        # (default-route-<hex> → default-internet-gateway, 0.0.0.0/0)
+        # are filtered out — they exist on every custom-mode network and
+        # always overlap any customer CIDR.
         network_a_self = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{name_a}"
         network_b_self = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{name_b}"
-        routes_a = list(
-            routes_client.list(
+        routes_a = [
+            r
+            for r in routes_client.list(
                 request=compute_v1.ListRoutesRequest(project=project, filter=f'network="{network_a_self}"'),
             )
-        )
+            if not _is_auto_route(r)
+        ]
         cross_a = [r.name for r in routes_a if _cidrs_overlap(r.dest_range or "", args.cidr_b)]
         result["tests"]["no_cross_routes_a"] = {"passed": not cross_a, "cross_routes": cross_a}
 
-        routes_b = list(
-            routes_client.list(
+        routes_b = [
+            r
+            for r in routes_client.list(
                 request=compute_v1.ListRoutesRequest(project=project, filter=f'network="{network_b_self}"'),
             )
-        )
+            if not _is_auto_route(r)
+        ]
         cross_b = [r.name for r in routes_b if _cidrs_overlap(r.dest_range or "", args.cidr_a)]
         result["tests"]["no_cross_routes_b"] = {"passed": not cross_b, "cross_routes": cross_b}
 
