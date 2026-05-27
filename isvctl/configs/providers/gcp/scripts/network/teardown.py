@@ -340,15 +340,22 @@ def main() -> int:
         "message": "",
     }
 
-    def _cleanup_local_keys() -> None:
-        # Runs regardless of cloud result (vendor-API contract).
+    def _cleanup_local_keys() -> list[str]:
+        # Runs regardless of cloud result (vendor-API contract). Returns
+        # any per-path OSError messages so the caller can AND them into the
+        # overall success — swallowing them would leave key material on
+        # disk while teardown still reported success (AWS oracle parity:
+        # aws/scripts/network/teardown.py lets local unlink failures
+        # propagate, test-quality rule #6).
+        errors: list[str] = []
         if args.key_created.lower() == "true" and args.key_file and args.key_file != "none":
             for p in (args.key_file, args.key_file + ".pub"):
                 try:
                     if p and os.path.exists(p):
                         os.remove(p)
-                except OSError:
-                    pass
+                except OSError as e:
+                    errors.append(f"local key file {p}: {e}")
+        return errors
 
     # No-op short-circuit BEFORE the auth-resolving project lookup so an
     # un-credentialed environment can still complete the local-key-file
@@ -358,11 +365,16 @@ def main() -> int:
             f"skipping network resource teardown (network_created={args.network_created}, "
             f"vpc-id={args.vpc_id}) — verified-reuse cleanup contract"
         )
-        result["success"] = True
-        result["resources_destroyed"] = True
-        _cleanup_local_keys()
+        key_errors = _cleanup_local_keys()
+        result["success"] = not key_errors
+        result["resources_destroyed"] = not key_errors
+        if key_errors:
+            result["cleanup_errors"] = key_errors
+            result["message"] = (
+                f"{result['message']}; local key cleanup failed: {key_errors}"
+            )
         print(json.dumps(result, indent=2))
-        return 0
+        return 0 if result["success"] else 1
 
     project = resolve_project(args.project)
     try:
@@ -380,7 +392,11 @@ def main() -> int:
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
 
-    _cleanup_local_keys()
+    key_errors = _cleanup_local_keys()
+    if key_errors:
+        result["cleanup_errors"] = key_errors
+        result["success"] = False
+        result["resources_destroyed"] = False
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
