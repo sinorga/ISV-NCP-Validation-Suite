@@ -164,7 +164,12 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--aspect"
           - "latency_perf"
-        timeout: 300
+        # Step body: subnet log_config readback + probe-VM insert (~90s)
+        # + 60s boot/traffic + Cloud Logging propagation poll (≤180s,
+        # 15s interval) + probe-VM delete (~120s). 600s gives ~150s
+        # headroom for slow-API days while staying in the documented
+        # ≤2× AWS-oracle cap discipline (oracle: 300s).
+        timeout: 600
 
       - name: sdn_filter_audit_trail
         phase: test
@@ -293,8 +298,22 @@ commands:
         timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_peering
 
+      # nvlink_domain is registered but `skip: true` by default for public
+      # GCP. The released `NvlinkDomainCheck` requires either (a) a real
+      # non-NVLink Compute Engine instance to emit `nvlink_supported=false`
+      # for the explicit-skip path, or (b) an NVLink-capable instance with
+      # a verified guest topology probe (`nvidia-smi topo`) — public Compute
+      # Engine APIs do NOT expose an NVLink domain identifier. The default
+      # setup does NOT create such a node (would incur GPU quota/cost), and
+      # an unresolved `--node-id` is a hard `node_resolved=False` failure per
+      # knowledge ("absence-of-VM is a different outcome from non-NVLink-shape").
+      # Skipping surfaces a STEP_NOT_CONFIGURED gap to the operator report
+      # explicitly rather than failing with a magic literal. Re-enable by
+      # setting `skip: false` and overriding `--node-id` to a live instance
+      # in your project (operator-provided knob).
       - name: nvlink_domain
         phase: test
+        skip: true
         command: "python3 ../scripts/network/nvlink_domain_test.py"
         args:
           - "--region"
