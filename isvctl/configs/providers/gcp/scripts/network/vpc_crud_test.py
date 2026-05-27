@@ -223,6 +223,8 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     peer_name = f"{name}-peer-{attempt}"
     peer_tracker: dict[str, bool] = {"created": False}
     peering_name = f"crud-peer-{attempt}"
+    peering_observed = False
+    cleanup_errors: list[str] = []
     try:
         _insert_network(
             project,
@@ -246,7 +248,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
         net = networks.get(project=project, network=name)
         names = {p.name for p in net.peerings or ()}
         if peering_name in names:
-            result["passed"] = True
+            peering_observed = True
             result["message"] = "peering observed on network — mutability proof"
         else:
             result["error"] = "peering not visible after add_peering"
@@ -259,9 +261,10 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
         wait_for_global_op(project, op.name, timeout=180)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
+        cleanup_errors.append(f"peering add/remove: {e}")
     finally:
         if peer_tracker["created"]:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
                     networks.delete(project=project, network=peer_name).name,
@@ -269,6 +272,17 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
                 ),
                 resource_desc=f"peer network {peer_name}",
             )
+            if not ok:
+                cleanup_errors.append(
+                    f"peer network {peer_name}: delete_with_retry returned False"
+                )
+    # `passed` requires BOTH the peering observation AND that all cleanup
+    # (remove_peering + peer-network delete) completed without errors.
+    # Otherwise a failed peer-network delete leaks a Compute network while
+    # the subtest still contributes passed=True to the top-level success.
+    result["passed"] = peering_observed and not cleanup_errors
+    if cleanup_errors:
+        result["cleanup_errors"] = cleanup_errors
     return result
 
 

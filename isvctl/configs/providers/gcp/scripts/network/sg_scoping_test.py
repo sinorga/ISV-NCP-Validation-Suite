@@ -683,7 +683,14 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                     zone=zone,
                     instance_resource=_build(name_allowed, sa_email),
                 )
-                cleanup.append(("instance", name_allowed))
+                # Track BEFORE the wait, dedup on retry. instances.insert
+                # was accepted, so the API may have materialized a stub
+                # instance record even if wait_for_zonal_op later raises on
+                # DONE-with-error — final cleanup MUST own the name so the
+                # provisioning row gets reaped. The dedup guard keeps the
+                # entry from being added twice across retry iterations.
+                if ("instance", name_allowed) not in cleanup:
+                    cleanup.append(("instance", name_allowed))
                 wait_for_zonal_op(project, zone, op.name, timeout=120)
                 propagation_ok = True
                 break
@@ -694,6 +701,10 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                 msg = str(ex)
                 # Async-failure tokens for actAs / SA propagation. Anything
                 # else (e.g., quota, stockout, unrelated op error) re-raises.
+                # We keep the cleanup tracker entry intact: the prior
+                # instances.insert was accepted by the API, so an instance
+                # row with this name may exist and must be reaped by final
+                # cleanup. Dedup is handled by the membership check above.
                 if (
                     "service account" in msg.lower()
                     or "actas" in msg.lower()
@@ -701,9 +712,6 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                     or "does not exist" in msg.lower()
                 ):
                     last_err = ex
-                    # The failed Operation may have already created a stub
-                    # instance record we tracked; do not double-track.
-                    cleanup[:] = [c for c in cleanup if c != ("instance", name_allowed)]
                     time.sleep(15)
                 else:
                     raise
