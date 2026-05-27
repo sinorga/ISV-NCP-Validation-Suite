@@ -202,25 +202,23 @@ def main() -> int:
         b_priv = instance_metadata[1]["private_ip"]
         if not a_ip or not wait_for_ssh(a_ip, SSH_USER, priv_path, max_attempts=30, interval=10):
             result["error"] = "ssh did not come up on instance A"
-            print(json.dumps(result, indent=2))
-            return 1
+        else:
+            # instance_to_instance ping. ssh_run returns (rc, stdout, stderr).
+            t0 = time.time()
+            rc, _, _ = ssh_run(a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}")
+            latency_ms = round((time.time() - t0) * 1000, 1)
+            result["tests"]["instance_to_instance"] = {
+                "passed": rc == 0,
+                "latency_ms": latency_ms,
+            }
 
-        # instance_to_instance ping. ssh_run returns (rc, stdout, stderr).
-        t0 = time.time()
-        rc, _, _ = ssh_run(a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}")
-        latency_ms = round((time.time() - t0) * 1000, 1)
-        result["tests"]["instance_to_instance"] = {
-            "passed": rc == 0,
-            "latency_ms": latency_ms,
-        }
+            # instance_to_internet
+            rc2, _, _ = ssh_run(
+                a_ip, SSH_USER, priv_path, "curl -s -m 5 -o /dev/null -w %{http_code} https://www.google.com"
+            )
+            result["tests"]["instance_to_internet"] = {"passed": rc2 == 0}
 
-        # instance_to_internet
-        rc2, _, _ = ssh_run(
-            a_ip, SSH_USER, priv_path, "curl -s -m 5 -o /dev/null -w %{http_code} https://www.google.com"
-        )
-        result["tests"]["instance_to_internet"] = {"passed": rc2 == 0}
-
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+            result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:

@@ -726,13 +726,22 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         cleanup_errors.append(f"subnet {n}: delete_with_retry returned False")
                 elif kind == "sa":
                     # SA delete is eventually-consistent; surface failure in
-                    # cleanup_errors but do not require it to pass.
+                    # cleanup_errors but do not require it to pass. `requests`
+                    # does not raise on non-2xx, so inspect status_code so 4xx/5xx
+                    # responses (other than 404 NotFound) are not silently ignored.
                     if session is not None:
                         try:
-                            session.delete(
+                            sa_resp = session.delete(
                                 f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{n}",
                                 timeout=30,
                             )
+                            sa_status = getattr(sa_resp, "status_code", None)
+                            if sa_status is not None and not (
+                                200 <= sa_status < 300 or sa_status == 404
+                            ):
+                                cleanup_errors.append(
+                                    f"sa {n} delete failed ({sa_status})"
+                                )
                         except Exception as e:
                             cleanup_errors.append(f"sa {n}: {e}")
                 else:
