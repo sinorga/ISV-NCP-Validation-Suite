@@ -864,8 +864,8 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                 cleanup_errors.append(f"{kind} {n}: {e}")
     # All cleanup failures (including non-404 SA delete failures) propagate
     # to the cleanup.passed gate so leaked IAM SAs and their bindings show up
-    # in step success instead of being silently dropped (factory rule: cleanup
-    # failures must propagate to step success).
+    # in step success instead of being silently dropped (cleanup contract:
+    # cleanup failures must propagate to step success).
     result["tests"]["cleanup"] = {
         "passed": not cleanup_errors,
         "errors": cleanup_errors,
