@@ -45,6 +45,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from common.compute import (
     narrow_region_to_zone,
     resolve_project,
+    short_name,
     unique_suffix,
     wait_for_zonal_op,
 )
@@ -92,11 +93,16 @@ def _resolve_instance(project: str, node_id: str) -> compute_v1.Instance | None:
 
 
 def _pick_subnet(project: str, region: str, vpc_id: str) -> str | None:
-    """Return the name of any subnetwork in ``region`` belonging to ``vpc_id``."""
+    """Return the name of any subnetwork in ``region`` belonging to ``vpc_id``.
+
+    Exact short-name comparison via :func:`short_name`. Raw selfLink suffix
+    matching accepts supersets (e.g., a sibling VPC whose name shares the
+    ``vpc_id`` suffix) and binds the probe to the wrong scope; the
+    scope-binding oracle rule mandates trailing-segment equality.
+    """
     client = compute_v1.SubnetworksClient()
-    suffix = f"/networks/{vpc_id}"
     for sub in client.list(project=project, region=region):
-        if (sub.network or "").endswith(suffix):
+        if short_name(sub.network) == vpc_id:
             return sub.name
     return None
 
