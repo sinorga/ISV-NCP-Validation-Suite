@@ -92,7 +92,7 @@ def ssh_run(
         opts.extend(["-o", f"ConnectTimeout={connect_timeout}"])
     try:
         proc = subprocess.run(
-            ["ssh", *opts, "-i", key_file, f"{user}@{host}", "--", command],
+            ["ssh", *opts, "-i", key_file, f"{user}@{host}", command],
             capture_output=True,
             timeout=timeout,
             text=True,
