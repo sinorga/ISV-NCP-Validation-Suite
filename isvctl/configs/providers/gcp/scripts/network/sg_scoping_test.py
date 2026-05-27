@@ -818,25 +818,37 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                     if not ok:
                         cleanup_errors.append(f"subnet {n}: delete_with_retry returned False")
                 elif kind == "sa":
-                    # SA delete is eventually-consistent; surface failure in
-                    # cleanup_errors but do not require it to pass. `requests`
-                    # does not raise on non-2xx, so inspect status_code so 4xx/5xx
-                    # responses (other than 404 NotFound) are not silently ignored.
+                    # SA delete: bounded retry to absorb eventually-consistent
+                    # propagation, then any non-404/non-2xx terminal status is
+                    # treated as a blocking cleanup failure so the step gates
+                    # honestly. `requests` does not raise on non-2xx, so inspect
+                    # status_code explicitly.
                     if session is not None:
-                        try:
-                            sa_resp = session.delete(
-                                f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{n}",
-                                timeout=30,
+                        sa_url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{n}"
+                        sa_status: int | None = None
+                        sa_exc: Exception | None = None
+                        for attempt in range(3):
+                            try:
+                                sa_resp = session.delete(sa_url, timeout=30)
+                                sa_status = getattr(sa_resp, "status_code", None)
+                                sa_exc = None
+                                if sa_status is None or (
+                                    200 <= sa_status < 300 or sa_status == 404
+                                ):
+                                    break
+                            except Exception as e:
+                                sa_exc = e
+                                sa_status = None
+                            if attempt < 2:
+                                time.sleep(5)
+                        if sa_exc is not None:
+                            cleanup_errors.append(f"sa {n}: {sa_exc}")
+                        elif sa_status is not None and not (
+                            200 <= sa_status < 300 or sa_status == 404
+                        ):
+                            cleanup_errors.append(
+                                f"sa {n} delete failed ({sa_status})"
                             )
-                            sa_status = getattr(sa_resp, "status_code", None)
-                            if sa_status is not None and not (
-                                200 <= sa_status < 300 or sa_status == 404
-                            ):
-                                cleanup_errors.append(
-                                    f"sa {n} delete failed ({sa_status})"
-                                )
-                        except Exception as e:
-                            cleanup_errors.append(f"sa {n}: {e}")
                 else:
                     ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
@@ -850,16 +862,15 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                         cleanup_errors.append(f"network {n}: delete_with_retry returned False")
             except Exception as e:
                 cleanup_errors.append(f"{kind} {n}: {e}")
-    # SA-delete errors recorded but excluded from the cleanup.passed gate
-    # (eventually-consistent — caller MUST not block teardown on it).
-    blocking_errors = [e for e in cleanup_errors if not e.startswith("sa ")]
+    # All cleanup failures (including non-404 SA delete failures) propagate
+    # to the cleanup.passed gate so leaked IAM SAs and their bindings show up
+    # in step success instead of being silently dropped (factory rule: cleanup
+    # failures must propagate to step success).
     result["tests"]["cleanup"] = {
-        "passed": not blocking_errors,
+        "passed": not cleanup_errors,
         "errors": cleanup_errors,
     }
-    # AND-in the cleanup gate; success was set inside try (False if try
-    # raised before any subtest was written).
-    result["success"] = result["success"] and not blocking_errors
+    result["success"] = result["success"] and not cleanup_errors
     return result
 
 

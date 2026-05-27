@@ -328,28 +328,14 @@ commands:
         timeout: 240
         output_schema: nvlink_domain
 
-      # backend_switch_fabric is registered as a contract-explicit
-      # EXCLUSION for public GCP. Public Compute Engine APIs do not
-      # expose backend leaf/spine/core switch identifiers for VM hosts,
-      # so fabricating switch IDs would violate the validator's "real
-      # provider metadata only; never demo literals" contract. The step
-      # is registered (so the exclusion is discoverable) but `skip: true`
-      # keeps it from running — the validator framework then surfaces a
-      # `STEP_NOT_CONFIGURED` skip against `BackendSwitchFabricCheck` so
-      # the operator report shows the gap explicitly rather than silently
-      # no-op'ing. Re-enable only when the operator wires a private or
-      # internal topology API able to return real switch IDs.
-      - name: backend_switch_fabric
-        phase: test
-        skip: true
-        command: "python3 ../scripts/network/backend_switch_fabric_test.py"
-        args:
-          - "--region"
-          - "{{region}}"
-          - "--node-id"
-          - "compute-node-1"
-        timeout: 60
-        output_schema: backend_switch_fabric
+      # backend_switch_fabric step is intentionally OMITTED for public GCP.
+      # `BackendSwitchFabricCheck` is excluded via `tests.exclude.tests`
+      # below — public Compute Engine APIs do not expose backend
+      # leaf/spine/core switch identifiers for VM hosts, so fabricating
+      # switch IDs would violate the validator's "real provider metadata
+      # only; never demo literals" contract. Re-add the step and remove
+      # the exclusion only when the operator wires a private or internal
+      # topology API able to return real switch IDs.
 
       - name: teardown
         phase: teardown
@@ -391,3 +377,12 @@ tests:
       checks:
         FloatingIpCheck:
           max_switch_seconds: 20
+
+  exclude:
+    tests:
+      # Public Compute Engine APIs do not expose backend leaf/spine/core
+      # switch identifiers for VM hosts. Knowledge classifies this as a
+      # gap (exclude_recommended: true); fabricating switch IDs would
+      # violate the validator's "real provider metadata only" contract.
+      # Re-enable when an internal/provider topology API is wired in.
+      - BackendSwitchFabricCheck

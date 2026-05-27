@@ -198,13 +198,11 @@ def main() -> int:
         a_pub = first_external_ip(a_obj)
         result["tests"]["verify_on_a"] = {"passed": a_pub == address_value, "public_ip": a_pub}
 
-        # reassociate_to_b — delete on A, add on B; time both ops.
-        # B was created without access_configs so this is exactly two ops.
-        # `passed` reflects whether the ops succeeded; the validator's
-        # max_switch_seconds budget check is what enforces timing — emitting
-        # passed=False on slow-but-completed switches would double-count the
-        # same failure and trip FloatingIpCheck's `error="test not found"`
-        # default-message path.
+        # reassociate_to_b — delete on A, add on B; time both ops. B was
+        # created without access_configs so this is exactly two ops. Gate
+        # `passed` on switch_seconds <= max_switch_seconds (AWS oracle parity):
+        # preserve the timing assertion in the step JSON instead of relying on
+        # validator-side reinterpretation of a step that already claims passed.
         b_obj = instances_c.get(project=project, zone=zone, instance=inst_b)
         b_nic = b_obj.network_interfaces[0].name or "nic0"
         t0 = time.time()
@@ -229,10 +227,19 @@ def main() -> int:
         )
         wait_for_zonal_op(project, zone, op.name, timeout=180)
         switch_seconds = round(time.time() - t0, 1)
-        result["tests"]["reassociate_to_b"] = {
-            "passed": True,
+        reassoc_subtest: dict[str, Any] = {
+            "passed": switch_seconds <= args.max_switch_seconds,
             "switch_seconds": switch_seconds,
         }
+        if switch_seconds <= args.max_switch_seconds:
+            reassoc_subtest["message"] = (
+                f"Reassociated in {switch_seconds}s (limit: {args.max_switch_seconds}s)"
+            )
+        else:
+            reassoc_subtest["error"] = (
+                f"Switch took {switch_seconds}s, exceeds {args.max_switch_seconds}s limit"
+            )
+        result["tests"]["reassociate_to_b"] = reassoc_subtest
 
         b_obj = instances_c.get(project=project, zone=zone, instance=inst_b)
         b_pub = first_external_ip(b_obj)
