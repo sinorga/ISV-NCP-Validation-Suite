@@ -19,7 +19,6 @@ import argparse
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -38,7 +37,7 @@ from common.compute import (
     wait_for_zonal_op,
 )
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
-from common.ssh_utils import ssh_run, wait_for_ssh
+from common.ssh_utils import parse_ping_avg_ms, ssh_run, wait_for_ssh
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
@@ -216,20 +215,30 @@ def main() -> int:
         if not a_ip or not wait_for_ssh(a_ip, SSH_USER, priv_path, max_attempts=30, interval=10):
             result["error"] = "ssh did not come up on instance A"
         else:
-            # instance_to_instance ping. ssh_run returns (rc, stdout, stderr).
-            t0 = time.time()
-            rc, _, _ = ssh_run(a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}")
-            latency_ms = round((time.time() - t0) * 1000, 1)
+            # AWS-oracle parity: both connectivity probes run `ping` over the
+            # remote-command channel and report the parsed average RTT —
+            # ICMP egress is the network signal the validator measures, not
+            # SSH orchestration wall-clock. ssh_run returns (rc, stdout, stderr).
+            rc_i2i, out_i2i, _ = ssh_run(
+                a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}"
+            )
+            latency_i2i = parse_ping_avg_ms(out_i2i)
             result["tests"]["instance_to_instance"] = {
-                "passed": rc == 0,
-                "latency_ms": latency_ms,
+                "passed": rc_i2i == 0 and latency_i2i is not None,
+                "latency_ms": latency_i2i,
             }
 
-            # instance_to_internet
-            rc2, _, _ = ssh_run(
-                a_ip, SSH_USER, priv_path, "curl -s -m 5 -o /dev/null -w %{http_code} https://www.google.com"
+            # instance_to_internet — ping a public anycast resolver. ICMP
+            # egress is the oracle's network signal; an HTTP probe can
+            # succeed even when ICMP egress is broken.
+            rc_i2w, out_i2w, _ = ssh_run(
+                a_ip, SSH_USER, priv_path, "ping -c 3 -W 3 8.8.8.8"
             )
-            result["tests"]["instance_to_internet"] = {"passed": rc2 == 0}
+            latency_i2w = parse_ping_avg_ms(out_i2w)
+            result["tests"]["instance_to_internet"] = {
+                "passed": rc_i2w == 0 and latency_i2w is not None,
+                "latency_ms": latency_i2w,
+            }
 
             result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:

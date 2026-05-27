@@ -67,6 +67,32 @@ def _try_ssh(host: str, user: str, key_file: str, remote_cmd: str = "exit 0") ->
         return False
 
 
+def parse_ping_avg_ms(stdout: str) -> float | None:
+    """Parse the average round-trip latency from ``ping`` stdout.
+
+    Linux ping summary format is::
+
+        rtt min/avg/max/mdev = 0.123/0.456/0.789/0.111 ms
+
+    Returns the parsed ``avg`` in milliseconds, or ``None`` when the
+    summary line is missing/malformed (e.g., all packets lost, or a
+    non-Linux ping implementation).
+    """
+    for line in stdout.splitlines():
+        marker = "min/avg/max"
+        idx = line.find(marker)
+        if idx < 0:
+            continue
+        rhs = line[idx:].split("=", 1)[-1].strip().split()[0]
+        parts = rhs.split("/")
+        if len(parts) >= 2:
+            try:
+                return float(parts[1])
+            except ValueError:
+                return None
+    return None
+
+
 def ssh_run(
     host: str,
     user: str,
