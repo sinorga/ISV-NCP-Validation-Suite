@@ -20,6 +20,15 @@
 #     exceeding the 10s AWS-shaped default. Override rather than skip so
 #     allocate / associate / reassociate subtests still run.
 #
+# GCP timeout: 240 (vs AWS 120) — Compute Engine API operations are async:
+# each create/patch/delete returns an Operation that must be polled to DONE
+# (wait_for_global_op / wait_for_region_op). AWS boto3 CRUD returns
+# synchronously; GCP's per-op DONE polling adds 10-30s baseline per wait.
+# Steps that stack 3+ resource ops (subnet_config, vpc_crud, sg_*scoping,
+# vpc_ip_config, byoip_test, dns_test, security_blocking, sdn_*) need ≤2×
+# the AWS oracle's 120s cap to stay clear of SIGKILL on slow API days —
+# the documented upper bound for an NCP-specific timeout override.
+#
 # Usage:
 #   uv run isvctl test run -f isvctl/configs/providers/gcp/config/network.yaml
 
@@ -53,7 +62,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.99.0.0/16"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_crud
 
       - name: subnet_config
@@ -66,7 +75,7 @@ commands:
           - "10.98.0.0/16"
           - "--subnet-count"
           - "4"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: subnet_config
 
       - name: vpc_isolation
@@ -79,7 +88,7 @@ commands:
           - "10.97.0.0/16"
           - "--cidr-b"
           - "10.96.0.0/16"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_isolation
 
       - name: sg_crud
@@ -90,7 +99,7 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.95.0.0/16"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: sg_crud
 
       - name: security_blocking
@@ -101,32 +110,37 @@ commands:
           - "{{region}}"
           - "--cidr"
           - "10.94.0.0/16"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: security_blocking
 
       - name: sg_workload_scoping
         phase: test
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "workload"]
-        timeout: 600
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
 
       - name: sg_node_scoping
         phase: test
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "node"]
-        timeout: 600
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
 
       - name: sg_subnet_scoping
         phase: test
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "subnet"]
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
 
       - name: sg_service_scoping
         phase: test
         command: "python3 ../scripts/network/sg_scoping_test.py"
         args: ["--region", "{{region}}", "--scope", "service"]
-        timeout: 900
+        # 600s == 2× the AWS oracle's 300s for sg_service_scoping. The
+        # VM-insert path stacks two sequential zonal VM creates (each a
+        # wait_for_zonal_op for the GCE Operation-DONE poll); 600s keeps
+        # the cap at the documented ≤2× upper bound for an NCP-specific
+        # override while leaving headroom for slow API days.
+        timeout: 600
 
       - name: sdn_hardware_fault_logging
         phase: test
@@ -138,7 +152,7 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--aspect"
           - "hardware_faults"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
 
       - name: sdn_latency_perf_logging
         phase: test
@@ -198,7 +212,7 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--region"
           - "{{region}}"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_ip_config
 
       - name: dhcp_ip_test
@@ -226,7 +240,7 @@ commands:
           - "100.64.0.0/16"
           - "--standard-cidr"
           - "10.90.0.0/16"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: byoip
 
       - name: stable_ip_test
@@ -263,7 +277,7 @@ commands:
           - "10.89.0.0/16"
           - "--domain"
           - "internal.isv.test"
-        timeout: 120
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: localized_dns
 
       - name: peering_test
@@ -276,8 +290,22 @@ commands:
           - "10.88.0.0/16"
           - "--cidr-b"
           - "10.87.0.0/16"
-        timeout: 600
+        timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_peering
+
+      - name: nvlink_domain
+        phase: test
+        command: "python3 ../scripts/network/nvlink_domain_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--node-id"
+          - "compute-node-1"
+        # Metadata-only probe (aggregated-list InstancesClient lookup +
+        # guestAccelerators inspection). No resource creation, no waits.
+        # 60s matches the my-isv template ceiling for the same step.
+        timeout: 60
+        output_schema: nvlink_domain
 
       - name: teardown
         phase: teardown

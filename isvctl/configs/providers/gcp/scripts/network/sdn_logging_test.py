@@ -295,14 +295,13 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
             "passed": fields_ok,
             "actor_field": result["actor_field"],
         }
-        result["tests"]["cleanup"] = {"passed": True}
-
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
+        cleanup_ok = True
         if created:
-            delete_with_retry(
+            cleanup_ok = delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
                     firewalls.delete(project=project, firewall=fw_name).name,
@@ -310,6 +309,9 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
                 ),
                 resource_desc=f"firewall {fw_name}",
             )
+    # Gate the cleanup subtest on the actual delete bool (AWS oracle parity).
+    result["tests"]["cleanup"] = {"passed": cleanup_ok}
+    result["success"] = result.get("success", False) and cleanup_ok
     return result
 
 
