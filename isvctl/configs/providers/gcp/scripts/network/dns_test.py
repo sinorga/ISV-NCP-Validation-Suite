@@ -110,10 +110,20 @@ def main() -> int:
         zone = client.zone(zone_name)
         zone.reload()
         is_private = zone._properties.get("visibility") == "private"
+        expected_network_url = (
+            f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{network}"
+        )
+        pvc = zone._properties.get("privateVisibilityConfig") or {}
+        bound_networks = [
+            (n.get("networkUrl") or "").replace("https://compute.googleapis.com/", "https://www.googleapis.com/")
+            for n in (pvc.get("networks") or [])
+        ]
+        network_bound = expected_network_url in bound_networks
         result["tests"]["create_hosted_zone"] = {
-            "passed": is_private,
+            "passed": is_private and network_bound,
             "zone_id": zone_name,
             "domain": domain,
+            "bound_networks": bound_networks,
         }
 
         # Insert A record. Gate `passed` on the Cloud DNS change reaching
