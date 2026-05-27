@@ -14,28 +14,22 @@ Divergences from the AWS oracle:
          aggregated-list across the project's zones (the operator's
          --node-id is a Compute Engine instance name, which is regional
          in our domain config but globally unique via the zone scope).
+         An unresolved node-id is a hard failure: the validator cannot
+         skip on absence-of-hardware because absence-of-VM is a separate
+         outcome from non-NVLink-shape. Emit node_resolved.passed=False.
       2. Read `guestAccelerators` on the resolved instance.
-      3. Emit `nvlink_supported=false` when no NVLink-capable
-         accelerator type is attached (knowledge `target_divergences`).
+      3. Emit `nvlink_supported=false` ONLY when the resolved instance
+         has no NVLink-capable accelerator type attached. The validator
+         then surfaces an explicit pytest.skip for the non-NVLink shape.
       4. When NVLink IS attached, a `nvidia-smi topo` guest probe is
-         required to populate `nvlink_domain_id`; this stub does not
-         SSH into the guest, so it conservatively still emits
-         `nvlink_supported=false` for the platform-probe path and
-         leaves the NVLink-positive path to a later guest-probe
-         enhancement (knowledge: "do not invent an ID from machine
-         type or zone"). The validator's pytest.skip then surfaces
-         the explicit "non-NVLink shape" outcome to the operator
-         instead of a synthetic pass.
-  * `--node-id` is the operator-provided literal from the YAML config
-    (mirrors my-isv template's "compute-node-1" placeholder). When
-    the literal does not resolve to a live instance, the probe still
-    completes honestly: `node_resolved=true` for the input string +
-    `nvlink_supported=false` for the absence-of-NVLink-hardware
-    finding. The canonical policy-skip JSON shape for documented
-    portability gaps — `rc=0` + `success=true` + `nvlink_supported=
-    false` — mirrors `providers/shared/deploy_nim.py`'s missing-key
-    skip shape; the validator's `pytest.skip` is then the explicit
-    operator-visible outcome instead of a synthetic hard failure.
+         required to populate `nvlink_domain_id`. This stub does NOT
+         SSH into the guest, so the NVLink-capable path fails
+         nvlink_support_detected with a clear "no provider-side
+         topology probe; guest probe required" message. Do NOT force
+         nvlink_supported=false to silently route through pytest.skip
+         — knowledge: "do not invent an ID from machine type or zone"
+         AND "Emit nvlink_supported=false ONLY from real evidence that
+         the resolved node is non-NVLink."
 """
 
 from __future__ import annotations
@@ -120,56 +114,72 @@ def main() -> int:
     try:
         instance = _resolve_instance(project, args.node_id)
 
-        # Honest node_resolved semantics: True when the input is a valid
-        # non-empty identifier and we completed the aggregated-list probe.
-        # An instance absent from the project still produces a valid
-        # detection outcome — the absence IS the answer (no NVLink hardware
-        # under that name). The canonical policy-skip JSON shape (rc=0 +
-        # success=true + nvlink_supported=false) is what surfaces an
-        # explicit "documented portability gap" outcome to the operator,
-        # not a hard failure.
-        result["tests"]["node_resolved"] = {
-            "passed": True,
-            "node_id": args.node_id,
-            "found": instance is not None,
-        }
-
         if instance is None:
-            # No instance — definitively no NVLink hardware accessible.
-            result["nvlink_supported"] = False
+            # Unresolved node-id is a hard failure: absence-of-VM is a
+            # different outcome from non-NVLink-shape, and the validator's
+            # pytest.skip on nvlink_supported=False is reserved for the
+            # latter. Force node_resolved.passed=False so the operator sees
+            # the missing-node signal explicitly, not a silent skip.
+            result["tests"]["node_resolved"] = {
+                "passed": False,
+                "node_id": args.node_id,
+                "found": False,
+                "message": (
+                    f"no Compute Engine instance named {args.node_id!r} found in project; "
+                    "set --node-id to a live instance name"
+                ),
+            }
             result["tests"]["nvlink_support_detected"] = {
-                "passed": True,
-                "reason": "no_instance_with_node_id",
-                "accelerators": [],
+                "passed": False,
+                "message": "node_resolved failed; NVLink support cannot be detected without a resolved instance",
             }
         else:
+            result["tests"]["node_resolved"] = {
+                "passed": True,
+                "node_id": args.node_id,
+                "found": True,
+            }
             accelerator_types = [
                 _accelerator_type_short(a.accelerator_type)
                 for a in (instance.guest_accelerators or ())
                 if a.accelerator_type
             ]
             nvlink_capable = any(_is_nvlink_capable(t) for t in accelerator_types)
-            result["tests"]["nvlink_support_detected"] = {
-                "passed": True,
-                "accelerators": accelerator_types,
-                "nvlink_capable_family_present": nvlink_capable,
-            }
-            # Even when an NVLink-capable accelerator is attached, the public
-            # Compute Engine API does not expose nvlink_domain_id; populating
-            # it requires an in-guest `nvidia-smi topo` probe (out of scope
-            # for this metadata-only stub). Conservative shape: emit
-            # nvlink_supported=false so the validator's pytest.skip path
-            # explicitly records "no provider-side NVLink-domain probe" and
-            # the operator follow-up is an enhancement, not a silent pass.
-            result["nvlink_supported"] = False
+            if nvlink_capable:
+                # NVLink hardware attached — the validator requires a real
+                # `nvlink_domain_id`. The public Compute Engine API does not
+                # expose one; populating it requires an in-guest probe
+                # (e.g., SSH + `nvidia-smi topo -m`) that this metadata-only
+                # stub does NOT perform. Per knowledge: do not invent an ID
+                # from machine type or zone, and do not emit
+                # nvlink_supported=false to silently route through
+                # pytest.skip on hardware that IS NVLink-capable. Fail the
+                # detection subtest with a clear message so the gap is
+                # explicit, not masked.
+                result["tests"]["nvlink_support_detected"] = {
+                    "passed": False,
+                    "accelerators": accelerator_types,
+                    "nvlink_capable_family_present": True,
+                    "message": (
+                        "NVLink-capable accelerators detected but no provider-side "
+                        "NVLink-domain API and no guest topology probe is implemented; "
+                        "an `nvidia-smi topo` SSH probe is required to emit a real "
+                        "nvlink_domain_id (do not invent from machine type or zone)"
+                    ),
+                }
+            else:
+                # No NVLink-capable accelerator on a resolved live instance —
+                # the canonical non-NVLink skip path. Validator emits
+                # pytest.skip on nvlink_supported=False.
+                result["tests"]["nvlink_support_detected"] = {
+                    "passed": True,
+                    "accelerators": accelerator_types,
+                    "nvlink_capable_family_present": False,
+                }
+                result["nvlink_supported"] = False
 
-        # tests.nvlink_domain_id_present is reached only when
-        # nvlink_supported=True (validator short-circuits on False via
-        # pytest.skip). The False default stays correct for the skip path
-        # and is what the schema requires.
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values() if "passed" in t)
-        # Validator only requires node_resolved + nvlink_support_detected
-        # for the skip path; success is the AND of those two probes.
+        # tests.nvlink_domain_id_present stays False (default) — only meaningful
+        # when nvlink_supported=True with a verified guest probe.
         result["success"] = (
             result["tests"]["node_resolved"]["passed"] and result["tests"]["nvlink_support_detected"]["passed"]
         )

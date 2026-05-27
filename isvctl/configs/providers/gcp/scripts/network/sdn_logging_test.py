@@ -122,9 +122,23 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
     """Each subtest issues a distinct probe — flow-log endpoint, named
     performance namespace, packet-metric filter, recency window — so the
     pass signal does not collapse to a single API call (AWS oracle parity).
+
+    Every metric/recency probe MUST be scoped to the target VPC. VPC Flow
+    Logs in Cloud Logging entries carry the originating network in
+    `jsonPayload.src_vpc.vpc_name` and `jsonPayload.dest_vpc.vpc_name`;
+    filtering on either-or scopes the query to traffic that traversed
+    THIS network. Without the scope, an unrelated VPC's flow logs can
+    satisfy the validator and the test passes on evidence from a network
+    the suite did not create — Rule #9 fake-signal. AWS oracle parity:
+    aws/scripts/network/sdn_logging_test.py scopes flow logs to the
+    requested vpc-id via the `resource-id` filter.
     """
     sample_window = 300
     flow_log_root = f'logName="projects/{project}/logs/compute.googleapis.com%2Fvpc_flows"'
+    # Target-VPC scope on jsonPayload network names. Either side of a
+    # connection (src or dest) attributed to our network suffices.
+    vpc_scope = f'(jsonPayload.src_vpc.vpc_name="{network}" OR jsonPayload.dest_vpc.vpc_name="{network}")'
+    flow_log_base = f"{flow_log_root} AND {vpc_scope}"
     result: dict[str, Any] = {
         "success": False,
         "platform": "network",
@@ -137,18 +151,18 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
         "tests": {},
     }
     try:
-        # 1. Metrics endpoint reachable: smallest possible filter against
-        # the VPC Flow Logs log name. Endpoint reachability is the only
-        # subtest that may legitimately pass on an empty result set —
-        # the others gate on observed samples.
-        endpoint_ok, _ = _list_log_entries(flow_log_root, max_results=1)
+        # 1. Metrics endpoint reachable: VPC Flow Logs API reachable for
+        # entries attributed to this network. Endpoint reachability is the
+        # only subtest that may legitimately pass on an empty result set —
+        # the others gate on observed samples bound to THIS network.
+        endpoint_ok, _ = _list_log_entries(flow_log_base, max_results=1)
         result["tests"]["metrics_endpoint_reachable"] = {"passed": endpoint_ok}
 
-        # 2. Performance metric present: narrow to entries carrying the
-        # bytes_sent / bytes_received fields the perf namespace uses.
+        # 2. Performance metric present: narrow to target-VPC entries
+        # carrying the bytes_sent fields the perf namespace uses.
         # Empty result MUST NOT read as present (AWS oracle parity:
         # SdnLatencyPerfLoggingCheck requires nonzero samples).
-        perf_filter = flow_log_root + " AND jsonPayload.bytes_sent:*"
+        perf_filter = flow_log_base + " AND jsonPayload.bytes_sent:*"
         perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
         result["tests"]["performance_metric_present"] = {
             "passed": perf_ok and perf_count > 0,
@@ -156,22 +170,22 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
             "matching_entries": perf_count,
         }
 
-        # 3. Packet metric present: distinct narrow to packet-count fields.
-        # Same nonzero-entry gate as performance_metric_present.
-        packet_filter = flow_log_root + " AND jsonPayload.packets_sent:*"
+        # 3. Packet metric present: distinct narrow to packet-count fields
+        # ALSO bound to the target VPC.
+        packet_filter = flow_log_base + " AND jsonPayload.packets_sent:*"
         packet_ok, flow_count = _list_log_entries(packet_filter, max_results=5)
         result["tests"]["packet_metric_present"] = {
             "passed": packet_ok and flow_count > 0,
             "flow_log_count": flow_count,
         }
 
-        # 4. Samples recent: filter on the last N-second window so a stale
-        # log archive doesn't false-pass. Recency check is meaningless
-        # without at least one matching entry.
+        # 4. Samples recent: recent N-second window AND target-VPC scope.
+        # Recency check is meaningless without at least one matching entry
+        # bound to THIS network.
         from datetime import datetime, timedelta
 
         since = (datetime.now(UTC) - timedelta(seconds=sample_window)).isoformat()
-        recent_filter = flow_log_root + f' AND timestamp>="{since}"'
+        recent_filter = flow_log_base + f' AND timestamp>="{since}"'
         recent_ok, recent_count = _list_log_entries(recent_filter, max_results=5)
         result["tests"]["samples_recent"] = {
             "passed": recent_ok and recent_count > 0,

@@ -247,7 +247,16 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         # per-resource errors into `cleanup_errors` so `cleanup.passed`
         # can gate on real outcomes (AWS oracle parity — silently-leaked
         # resources must NOT read as cleanup success).
+        # Per-resource wait timeouts MUST each fit within the step cap of
+        # 240s (provider config sg_workload_scoping / sg_node_scoping) and
+        # SHOULD NOT exceed the AWS-oracle 120s ceiling. Instance cleanup
+        # uses a fire-and-poll pattern: issue the async delete, then poll
+        # for the instance to disappear (NotFound = success) with a tight
+        # budget. The polling loop returns as soon as the instance is
+        # gone OR the wait budget is consumed, so the longest single wait
+        # in the cleanup chain stays inside the cap.
         priority = {"instance": 0, "firewall": 1, "subnet": 2, "network": 3}
+        instance_cleanup_wait = 100
         for kind, n in sorted(cleanup, key=lambda kv: priority.get(kv[0], 99)):
             try:
                 if kind == "instance":
@@ -256,7 +265,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                             project,
                             zone,
                             instances_c.delete(project=project, zone=zone, instance=nn).name,
-                            timeout=300,
+                            timeout=instance_cleanup_wait,
                         ),
                         resource_desc=f"instance {n}",
                     )
@@ -265,7 +274,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         lambda nn=n: wait_for_global_op(
                             project,
                             firewalls.delete(project=project, firewall=nn).name,
-                            timeout=120,
+                            timeout=60,
                         ),
                         resource_desc=f"firewall {n}",
                     )
@@ -275,7 +284,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                             project,
                             region,
                             subnets_c.delete(project=project, region=region, subnetwork=nn).name,
-                            timeout=180,
+                            timeout=60,
                         ),
                         resource_desc=f"subnet {n}",
                     )
@@ -284,7 +293,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                         lambda nn=n: wait_for_global_op(
                             project,
                             networks.delete(project=project, network=nn).name,
-                            timeout=180,
+                            timeout=60,
                         ),
                         resource_desc=f"network {n}",
                     )
