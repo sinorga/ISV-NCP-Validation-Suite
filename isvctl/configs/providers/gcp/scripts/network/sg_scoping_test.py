@@ -53,16 +53,90 @@ ISV_DESCRIPTION = "isvtest sg_scoping — verified-reuse marker"
 
 
 def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) -> None:
-    op = compute_v1.NetworksClient().insert(
-        project=project,
-        network_resource=compute_v1.Network(
-            name=name,
-            description=ISV_DESCRIPTION,
-            auto_create_subnetworks=False,
-        ),
-    )
+    networks = compute_v1.NetworksClient()
+    subnets_client = compute_v1.SubnetworksClient()
+    firewalls_client = compute_v1.FirewallsClient()
+    instances_client = compute_v1.InstancesClient()
+    # Compute Engine resource names are scoped to (project, RUN_ID[:8])
+    # via unique_suffix; a prior killed run in the same RUN_ID can leave
+    # an orphan network behind. Verified-reuse it via the ISV description
+    # marker so the same RUN_ID can recover its own leftovers; refuse to
+    # adopt a name owned by something else. The 409 branch below is the
+    # ONLY delete-then-recreate path; never issue an unconditional
+    # pre-clean delete without first reading the network and verifying
+    # ISV ownership.
+    try:
+        op = networks.insert(
+            project=project,
+            network_resource=compute_v1.Network(
+                name=name,
+                description=ISV_DESCRIPTION,
+                auto_create_subnetworks=False,
+            ),
+        )
+    except gax.Conflict:
+        existing = networks.get(project=project, network=name)
+        if (existing.description or "") != ISV_DESCRIPTION:
+            raise RuntimeError(
+                f"network {name!r} exists in {project} without ISV ownership marker; refusing to adopt"
+            ) from None
+        network_self = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{name}"
+        # Sweep dependents before deleting the network (GCE rejects
+        # network deletes while any instance/firewall/subnet still
+        # attaches to it).
+        try:
+            agg = instances_client.aggregated_list(project=project)
+            for zone_name, scoped in agg:
+                if not scoped.instances:
+                    continue
+                zone_short = zone_name.replace("zones/", "")
+                for inst in scoped.instances:
+                    in_net = any(
+                        (ni.network or "").endswith(f"/networks/{name}") for ni in inst.network_interfaces or ()
+                    )
+                    if not in_net:
+                        continue
+                    try:
+                        i_op = instances_client.delete(project=project, zone=zone_short, instance=inst.name)
+                        wait_for_zonal_op(project, zone_short, i_op.name, timeout=180)
+                    except gax.NotFound:
+                        pass
+        except gax.NotFound:
+            pass
+        for fw in firewalls_client.list(
+            request=compute_v1.ListFirewallsRequest(project=project, filter=f'network="{network_self}"'),
+        ):
+            try:
+                f_op = firewalls_client.delete(project=project, firewall=fw.name)
+                wait_for_global_op(project, f_op.name, timeout=120)
+            except gax.NotFound:
+                pass
+        for selflink in existing.subnetworks or ():
+            parts = selflink.split("/")
+            sub_region = parts[parts.index("regions") + 1] if "regions" in parts else ""
+            sub_name = parts[-1]
+            if not sub_region:
+                continue
+            try:
+                s_op = subnets_client.delete(project=project, region=sub_region, subnetwork=sub_name)
+                wait_for_region_op(project, sub_region, s_op.name, timeout=180)
+            except gax.NotFound:
+                pass
+        del_op = networks.delete(project=project, network=name)
+        wait_for_global_op(project, del_op.name, timeout=180)
+        op = networks.insert(
+            project=project,
+            network_resource=compute_v1.Network(
+                name=name,
+                description=ISV_DESCRIPTION,
+                auto_create_subnetworks=False,
+            ),
+        )
     cleanup.append(("network", name))
-    # Cap fits the 240s step timeout (network.yaml sg_*_scoping).
+    # Cap fits the 600s step timeout (network.yaml sg_*_scoping). The
+    # 409 reuse branch above can stack ~180s instance + ~120s firewall
+    # + ~180s subnet + ~180s network deletes ahead of this final wait;
+    # the outer step cap accommodates the cumulative recovery path.
     wait_for_global_op(project, op.name, timeout=180)
 
 
@@ -136,17 +210,12 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
     blocked_key = "other_workload_blocked" if scope == "workload" else "other_node_blocked"
     try:
         # Stamp tracker BEFORE wait — partial-failure visibility contract.
-        op = networks.insert(
-            project=project,
-            network_resource=compute_v1.Network(
-                name=network,
-                description=ISV_DESCRIPTION,
-                auto_create_subnetworks=False,
-            ),
-        )
-        cleanup.append(("network", network))
-        # Cap fits the 240s step timeout (network.yaml sg_*_scoping).
-        wait_for_global_op(project, op.name, timeout=180)
+        # _insert_network handles the 409/orphan-recovery path: a prior
+        # killed run in the same RUN_ID can leave the named network behind,
+        # and unique_suffix uses RUN_ID[:8] so the same name recurs across
+        # retries. The helper verifies the ISV ownership marker before
+        # deleting and re-inserting.
+        _insert_network(project, network, cleanup=cleanup)
 
         op = subnets_c.insert(
             project=project,
@@ -289,16 +358,14 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         # per-resource errors into `cleanup_errors` so `cleanup.passed`
         # can gate on real outcomes (AWS oracle parity — silently-leaked
         # resources must NOT read as cleanup success).
-        # Per-resource wait timeouts MUST each fit within the step cap of
-        # 240s (provider config sg_workload_scoping / sg_node_scoping) and
-        # SHOULD NOT exceed the AWS-oracle 120s ceiling. Instance cleanup
-        # uses a fire-and-poll pattern: issue the async delete, then poll
-        # for the instance to disappear (NotFound = success) with a tight
-        # budget. The polling loop returns as soon as the instance is
-        # gone OR the wait budget is consumed, so the longest single wait
-        # in the cleanup chain stays inside the cap.
+        # Per-resource wait timeouts each fit within the step cap of 600s
+        # (provider config sg_workload_scoping / sg_node_scoping). Issue
+        # the async delete then wait for the GCE Operation DONE poll;
+        # observed live: ~120-160s per VM delete on slow API days. 180s
+        # gives headroom while the outer 600s step budget accommodates
+        # two sequential VM deletes plus firewall/subnet/network deletes.
         priority = {"instance": 0, "firewall": 1, "subnet": 2, "network": 3}
-        instance_cleanup_wait = 100
+        instance_cleanup_wait = 180
         for kind, n in sorted(cleanup, key=lambda kv: priority.get(kv[0], 99)):
             try:
                 if kind == "instance":
