@@ -162,21 +162,13 @@ def test_create_vpc(project: str, name: str, tracker: dict[str, bool]) -> dict[s
     """Track create-success BEFORE the wait so a failing wait still triggers
     teardown of the accepted-but-not-DONE network.
 
-    The CRUD test reuses a stable, RUN_ID-derived name; a prior failed
-    attempt with the same RUN_ID can leave the network around and turn the
-    next insert into a 409. Pre-clean (NotFound-tolerant) before insert so
-    the live gate is not blocked by leftovers from an earlier failure.
+    Conflict handling: ``_insert_network`` catches 409 ``AlreadyExists`` and
+    delegates to ``_adopt_and_remove_orphan``, which reads the existing
+    network and refuses to adopt unless its description matches
+    ``ISV_DESCRIPTION``. That is the ONLY path that may delete a colliding
+    network; no unconditional pre-clean delete is issued from here.
     """
     result: dict[str, Any] = {"passed": False, "vpc_id": name}
-    networks = compute_v1.NetworksClient()
-    delete_with_retry(
-        lambda: wait_for_global_op(
-            project,
-            networks.delete(project=project, network=name).name,
-            timeout=180,
-        ),
-        resource_desc=f"pre-clean stale network {name}",
-    )
     try:
         _insert_network(project, name, on_dispatch=lambda: tracker.__setitem__("created", True))
         result["passed"] = True

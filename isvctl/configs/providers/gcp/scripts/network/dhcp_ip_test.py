@@ -48,9 +48,8 @@ SSH_USER = "isvtest"
 # Network tag matching create_vpc.py's firewall target_tags=["isvtest"].
 # Compute Engine firewalls bind by network tag, not by direct
 # "instance.security_group" reference — the instance MUST carry this tag
-# for ingress on tcp/22 to land; live run #9a7777fe failed at SSH because
-# the instance was tagless and the create_vpc firewall therefore did not
-# match.
+# for ingress on tcp/22 to land. Without it, the create_vpc firewall does
+# not match and wait_for_ssh times out.
 ISV_FIREWALL_TAG = "isvtest"
 
 
