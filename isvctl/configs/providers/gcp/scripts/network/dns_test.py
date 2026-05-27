@@ -110,9 +110,7 @@ def main() -> int:
         zone = client.zone(zone_name)
         zone.reload()
         is_private = zone._properties.get("visibility") == "private"
-        expected_network_url = (
-            f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{network}"
-        )
+        expected_network_url = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{network}"
         pvc = zone._properties.get("privateVisibilityConfig") or {}
         bound_networks = [
             (n.get("networkUrl") or "").replace("https://compute.googleapis.com/", "https://www.googleapis.com/")

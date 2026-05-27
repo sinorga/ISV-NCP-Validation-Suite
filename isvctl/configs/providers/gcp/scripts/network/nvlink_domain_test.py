@@ -129,8 +129,7 @@ def _submit_probe_insert(
     subnet = _pick_subnet(project, region, vpc_id)
     if subnet is None:
         raise RuntimeError(
-            f"no subnetwork found in region {region} for VPC {vpc_id!r}; "
-            "create_network must run before nvlink_domain"
+            f"no subnetwork found in region {region} for VPC {vpc_id!r}; create_network must run before nvlink_domain"
         )
     zone = narrow_region_to_zone(region)
     instances_c = compute_v1.InstancesClient()
@@ -218,9 +217,7 @@ def main() -> int:
             # If wait_for_zonal_op times out or returns DONE-with-error,
             # the `finally` path still names the accepted VM and deletes
             # it, so a half-created probe cannot leak.
-            probe_zone, op_name = _submit_probe_insert(
-                project, args.region, args.vpc_id, probe_name
-            )
+            probe_zone, op_name = _submit_probe_insert(project, args.region, args.vpc_id, probe_name)
             probe_created = True
             result["node_id"] = probe_name
             chosen_node_id = probe_name
@@ -269,8 +266,7 @@ def main() -> int:
         # nvlink_domain_id_present stays False — only meaningful on the
         # NVLink-supported path with a verified guest probe.
         result["success"] = (
-            result["tests"]["node_resolved"]["passed"]
-            and result["tests"]["nvlink_support_detected"]["passed"]
+            result["tests"]["node_resolved"]["passed"] and result["tests"]["nvlink_support_detected"]["passed"]
         )
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
@@ -285,10 +281,8 @@ def main() -> int:
                     lambda: wait_for_zonal_op(
                         project,
                         probe_zone,
-                        instances_c.delete(
-                            project=project, zone=probe_zone, instance=probe_name
-                        ).name,
-                        timeout=120,
+                        instances_c.delete(project=project, zone=probe_zone, instance=probe_name).name,
+                        timeout=180,
                     ),
                     resource_desc=f"probe instance {probe_name}",
                 )
