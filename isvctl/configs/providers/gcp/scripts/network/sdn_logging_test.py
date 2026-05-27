@@ -147,11 +147,7 @@ def _list_vpc_subnets(project: str, region: str, network: str) -> list[compute_v
     ``/networks/{network}``."""
     client = compute_v1.SubnetworksClient()
     network_suffix = f"/networks/{network}"
-    return [
-        s
-        for s in client.list(project=project, region=region)
-        if (s.network or "").endswith(network_suffix)
-    ]
+    return [s for s in client.list(project=project, region=region) if (s.network or "").endswith(network_suffix)]
 
 
 def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
@@ -207,15 +203,14 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
         subnets = _list_vpc_subnets(project, region, network)
         if not subnets:
             raise RuntimeError(
-                f"no subnetworks found for VPC {network!r} in region {region}; "
-                "create_network must precede this step"
+                f"no subnetworks found for VPC {network!r} in region {region}; create_network must precede this step"
             )
         for sub in subnets:
             if getattr(sub.log_config, "enable", False):
                 flow_logs_enabled = True
                 probe_subnet = sub
                 break
-        if not flow_logs_enabled:
+        if not flow_logs_enabled or probe_subnet is None:
             raise RuntimeError(
                 f"VPC {network!r} has subnetworks without log_config.enable=True; "
                 "create_vpc.py must set SubnetworkLogConfig(enable=True) at subnet create"
@@ -349,9 +344,7 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
     if cleanup_error:
         cleanup_test["error"] = cleanup_error
     result["tests"]["cleanup"] = cleanup_test
-    result["success"] = bool(result["tests"]) and all(
-        t.get("passed", False) for t in result["tests"].values()
-    )
+    result["success"] = bool(result["tests"]) and all(t.get("passed", False) for t in result["tests"].values())
     return result
 
 

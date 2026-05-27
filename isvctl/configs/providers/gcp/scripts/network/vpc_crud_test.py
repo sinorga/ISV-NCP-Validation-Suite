@@ -284,9 +284,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
                 resource_desc=f"peering {pname} on main vpc {name}",
             )
             if not ok:
-                cleanup_errors.append(
-                    f"peering {pname} on main vpc {name}: delete_with_retry returned False"
-                )
+                cleanup_errors.append(f"peering {pname} on main vpc {name}: delete_with_retry returned False")
         if peer_tracker["created"]:
             ok = delete_with_retry(
                 lambda: wait_for_global_op(
@@ -297,9 +295,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
                 resource_desc=f"peer network {peer_name}",
             )
             if not ok:
-                cleanup_errors.append(
-                    f"peer network {peer_name}: delete_with_retry returned False"
-                )
+                cleanup_errors.append(f"peer network {peer_name}: delete_with_retry returned False")
     # `passed` requires BOTH the peering observation AND that all cleanup
     # (remove_peering + peer-network delete) completed without errors.
     # Otherwise a failed peer-network delete leaks a Compute network while

@@ -232,13 +232,9 @@ def main() -> int:
             "switch_seconds": switch_seconds,
         }
         if switch_seconds <= args.max_switch_seconds:
-            reassoc_subtest["message"] = (
-                f"Reassociated in {switch_seconds}s (limit: {args.max_switch_seconds}s)"
-            )
+            reassoc_subtest["message"] = f"Reassociated in {switch_seconds}s (limit: {args.max_switch_seconds}s)"
         else:
-            reassoc_subtest["error"] = (
-                f"Switch took {switch_seconds}s, exceeds {args.max_switch_seconds}s limit"
-            )
+            reassoc_subtest["error"] = f"Switch took {switch_seconds}s, exceeds {args.max_switch_seconds}s limit"
         result["tests"]["reassociate_to_b"] = reassoc_subtest
 
         b_obj = instances_c.get(project=project, zone=zone, instance=inst_b)

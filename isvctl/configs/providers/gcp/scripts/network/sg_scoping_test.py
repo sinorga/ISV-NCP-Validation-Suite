@@ -189,10 +189,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         fw_target_tags = list(fw_obj.target_tags or ())
         fw_network = (fw_obj.network or "").rsplit("/", 1)[-1]
         fw_direction = fw_obj.direction or ""
-        fw_allowed_entries = [
-            (a.I_p_protocol or "", list(a.ports or ()))
-            for a in (fw_obj.allowed or ())
-        ]
+        fw_allowed_entries = [(a.I_p_protocol or "", list(a.ports or ())) for a in (fw_obj.allowed or ())]
         firewall_scoped = (
             fw_target_tags == [tag]
             and fw_network == network
@@ -277,10 +274,7 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         }
         result["tests"][blocked_key] = {
             "passed": firewall_scoped and tag not in other_tags,
-            "message": (
-                f"firewall {fw} scoped to tag {tag} AND untagged VM "
-                f"{name_other} does NOT carry the targetTag"
-            ),
+            "message": (f"firewall {fw} scoped to tag {tag} AND untagged VM {name_other} does NOT carry the targetTag"),
             "observed_tags": sorted(other_tags),
             "firewall_scoped": firewall_scoped,
         }
@@ -716,9 +710,7 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                 else:
                     raise
         if not propagation_ok:
-            raise RuntimeError(
-                f"actAs propagation poll timed out on instances.insert: {last_err}"
-            )
+            raise RuntimeError(f"actAs propagation poll timed out on instances.insert: {last_err}")
 
         # SA-attached insert has succeeded — actAs is now effective. The
         # second VM (no SA) does not exercise actAs and can be inserted
@@ -832,9 +824,7 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                                 sa_resp = session.delete(sa_url, timeout=30)
                                 sa_status = getattr(sa_resp, "status_code", None)
                                 sa_exc = None
-                                if sa_status is None or (
-                                    200 <= sa_status < 300 or sa_status == 404
-                                ):
+                                if sa_status is None or (200 <= sa_status < 300 or sa_status == 404):
                                     break
                             except Exception as e:
                                 sa_exc = e
@@ -843,12 +833,8 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                                 time.sleep(5)
                         if sa_exc is not None:
                             cleanup_errors.append(f"sa {n}: {sa_exc}")
-                        elif sa_status is not None and not (
-                            200 <= sa_status < 300 or sa_status == 404
-                        ):
-                            cleanup_errors.append(
-                                f"sa {n} delete failed ({sa_status})"
-                            )
+                        elif sa_status is not None and not (200 <= sa_status < 300 or sa_status == 404):
+                            cleanup_errors.append(f"sa {n} delete failed ({sa_status})")
                 else:
                     ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(

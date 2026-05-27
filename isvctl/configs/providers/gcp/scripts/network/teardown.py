@@ -370,9 +370,7 @@ def main() -> int:
         result["resources_destroyed"] = not key_errors
         if key_errors:
             result["cleanup_errors"] = key_errors
-            result["message"] = (
-                f"{result['message']}; local key cleanup failed: {key_errors}"
-            )
+            result["message"] = f"{result['message']}; local key cleanup failed: {key_errors}"
         print(json.dumps(result, indent=2))
         return 0 if result["success"] else 1
 

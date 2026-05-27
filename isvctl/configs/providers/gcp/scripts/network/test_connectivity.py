@@ -219,9 +219,7 @@ def main() -> int:
             # remote-command channel and report the parsed average RTT —
             # ICMP egress is the network signal the validator measures, not
             # SSH orchestration wall-clock. ssh_run returns (rc, stdout, stderr).
-            rc_i2i, out_i2i, _ = ssh_run(
-                a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}"
-            )
+            rc_i2i, out_i2i, _ = ssh_run(a_ip, SSH_USER, priv_path, f"ping -c 3 -W 3 {b_priv}")
             latency_i2i = parse_ping_avg_ms(out_i2i)
             result["tests"]["instance_to_instance"] = {
                 "passed": rc_i2i == 0 and latency_i2i is not None,
@@ -231,9 +229,7 @@ def main() -> int:
             # instance_to_internet — ping a public anycast resolver. ICMP
             # egress is the oracle's network signal; an HTTP probe can
             # succeed even when ICMP egress is broken.
-            rc_i2w, out_i2w, _ = ssh_run(
-                a_ip, SSH_USER, priv_path, "ping -c 3 -W 3 8.8.8.8"
-            )
+            rc_i2w, out_i2w, _ = ssh_run(a_ip, SSH_USER, priv_path, "ping -c 3 -W 3 8.8.8.8")
             latency_i2w = parse_ping_avg_ms(out_i2w)
             result["tests"]["instance_to_internet"] = {
                 "passed": rc_i2w == 0 and latency_i2w is not None,
