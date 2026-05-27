@@ -62,11 +62,32 @@ def classify_gcp_error(e: Exception) -> tuple[str, str]:
     return "unknown_error", str(e)
 
 
+# Compute Engine surfaces dependency-propagation windows as HTTP 400
+# BadRequest / FailedPrecondition with a small set of marker substrings
+# (`resourceInUseByAnotherResource`, `resourceNotReady`, `is not ready`,
+# `not ready`, `in use by`). The AWS oracle treats `DependencyViolation`
+# the same way — retry with backoff, not hard fail.
+_IN_USE_DEPENDENCY_MARKERS = (
+    "resourceInUseByAnotherResource",
+    "resourceNotReady",
+    "is not ready",
+    "not ready",
+    "in use by",
+)
+
+
+def _is_in_use_dependency(e: Exception) -> bool:
+    if not isinstance(e, gax.BadRequest | gax.FailedPrecondition):
+        return False
+    msg = str(e)
+    return any(marker in msg for marker in _IN_USE_DEPENDENCY_MARKERS)
+
+
 def delete_with_retry(
     fn: Callable[..., Any],
     *args: Any,
     resource_desc: str = "resource",
-    attempts: int = 3,
+    attempts: int = 5,
     backoff_seconds: float = 2.0,
     **kwargs: Any,
 ) -> bool:
@@ -76,6 +97,13 @@ def delete_with_retry(
     already gone (NotFound counts as success — the desired terminal state
     is reached). Mirrors providers/aws/scripts/common/errors.delete_with_retry
     so callers can write provider-portable cleanup blocks.
+
+    Compute Engine returns HTTP 400 BadRequest / FailedPrecondition with
+    `resourceInUseByAnotherResource` / `resourceNotReady` markers during
+    normal dependency-propagation windows (e.g., a subnet whose firewall
+    just deleted, a network whose route just reaped). These are the GCP
+    equivalents of AWS `DependencyViolation` and MUST be retried with
+    bounded backoff, not surfaced as non-transient failures.
 
     The bool return MUST be consumed by the caller and AND-ed into the
     teardown result — helpers that return ``bool`` for batch-cleanup
@@ -99,6 +127,24 @@ def delete_with_retry(
                 time.sleep(delay)
                 continue
             logger.exception("Failed to delete %s after %d attempts", resource_desc, attempts)
+            return False
+        except (gax.BadRequest, gax.FailedPrecondition) as e:
+            if _is_in_use_dependency(e) and attempt < attempts:
+                last_error = e
+                delay = backoff_seconds * attempt
+                logger.warning(
+                    "Dependency-in-use deleting %s (attempt %d/%d): %s; retrying in %.1fs",
+                    resource_desc, attempt, attempts, e, delay,
+                )
+                time.sleep(delay)
+                continue
+            if _is_in_use_dependency(e):
+                logger.error(
+                    "Dependency-in-use deleting %s after %d attempts: %s",
+                    resource_desc, attempts, e,
+                )
+            else:
+                logger.exception("Non-transient API error deleting %s", resource_desc)
             return False
         except gax.GoogleAPICallError:
             logger.exception("Non-transient API error deleting %s", resource_desc)

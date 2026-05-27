@@ -123,6 +123,12 @@ def _delete_network_resources(
         "internet_gateways": [],
     }
     successes: list[bool] = []
+    # Enumeration failures (list/get) MUST be recorded — a failed list can
+    # skip an entire resource class and silently leak; AWS oracle treats
+    # describe errors as hard failures via the outer ClientError catch in
+    # main(). NotFound on the network-level get (peerings) IS success
+    # because the network has been deleted already.
+    enum_errors: list[str] = []
     network_self = f"https://www.googleapis.com/compute/v1/projects/{project}/global/networks/{network}"
 
     instances_c = compute_v1.InstancesClient()
@@ -153,8 +159,14 @@ def _delete_network_resources(
                 )
                 successes.append(ok)
                 deleted["instances"].append(inst.name)
+    except gax.NotFound as e:
+        # Project-level aggregated_list returning NotFound means the project
+        # itself is gone — treat as no work to do, do not record as failure.
+        print(f"WARN: instance aggregated_list NotFound: {e}", file=sys.stderr)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: instance enumeration failed: {e}", file=sys.stderr)
+        msg = f"instance enumeration failed: {e}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        enum_errors.append(msg)
 
     # Firewalls.
     try:
@@ -171,8 +183,12 @@ def _delete_network_resources(
             )
             successes.append(ok)
             deleted["firewalls"].append(fw.name)
+    except gax.NotFound as e:
+        print(f"WARN: firewall list NotFound: {e}", file=sys.stderr)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: firewall enumeration failed: {e}", file=sys.stderr)
+        msg = f"firewall enumeration failed: {e}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        enum_errors.append(msg)
 
     # Routes (skip auto-routes).
     try:
@@ -191,10 +207,17 @@ def _delete_network_resources(
             )
             successes.append(ok)
             deleted["routes"].append(r.name)
+    except gax.NotFound as e:
+        print(f"WARN: route list NotFound: {e}", file=sys.stderr)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: route enumeration failed: {e}", file=sys.stderr)
+        msg = f"route enumeration failed: {e}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        enum_errors.append(msg)
 
-    # Peerings — remove on this network's side.
+    # Peerings — remove on this network's side. NotFound on the network
+    # get means the network is already gone (peerings reaped with it);
+    # any other API error during the read MUST count as enumeration
+    # failure so the step does not exit success while leaving peerings.
     try:
         net_obj = networks_c.get(project=project, network=network)
         for p in net_obj.peerings or ():
@@ -215,7 +238,9 @@ def _delete_network_resources(
     except gax.NotFound:
         pass
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: peering enumeration failed: {e}", file=sys.stderr)
+        msg = f"peering enumeration failed: {e}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        enum_errors.append(msg)
 
     # Subnets (regional). Subnets can sit in a 'not ready' window for
     # tens of seconds after their parent network's recent ops; wrap the
@@ -238,8 +263,12 @@ def _delete_network_resources(
                 )
                 successes.append(ok)
                 deleted["subnets"].append(sub.name)
+    except gax.NotFound as e:
+        print(f"WARN: subnet list NotFound: {e}", file=sys.stderr)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: subnet enumeration failed: {e}", file=sys.stderr)
+        msg = f"subnet enumeration failed: {e}"
+        print(f"WARN: {msg}", file=sys.stderr)
+        enum_errors.append(msg)
 
     # Addresses are intentionally NOT swept here. Regional addresses are
     # not attached to a specific network — `addresses.list` returns every
@@ -274,7 +303,11 @@ def _delete_network_resources(
     except gax.NotFound:
         deleted["vpc"] = network
 
-    return {"deleted": deleted, "all_ok": all(successes) if successes else True}
+    # all_ok requires both: every delete returned True AND no enumeration
+    # failure was downgraded to WARN. Without the enum_errors gate, a list
+    # failure can skip an entire resource class and exit success.
+    all_ok = (all(successes) if successes else True) and not enum_errors
+    return {"deleted": deleted, "all_ok": all_ok, "enum_errors": enum_errors}
 
 
 @handle_gcp_errors
@@ -337,7 +370,13 @@ def main() -> int:
         result["deleted"] = sub["deleted"]
         result["resources_destroyed"] = sub["all_ok"]
         result["success"] = sub["all_ok"]
-        result["message"] = "network teardown complete"
+        if sub.get("enum_errors"):
+            result["enum_errors"] = sub["enum_errors"]
+            result["message"] = (
+                "network teardown completed with enumeration failures; some resource classes may have been skipped"
+            )
+        else:
+            result["message"] = "network teardown complete"
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
 
