@@ -244,12 +244,16 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
         )
         op = instances_c.insert(project=project, zone=zone, instance_resource=probe)
         probe_created = True
-        wait_for_zonal_op(project, zone, op.name, timeout=180)
+        # Each individual wait must fit within the orchestrator step
+        # timeout (180s — AWS oracle cap). Probe VM insert typically
+        # completes in 30-60s; cap at 90s.
+        wait_for_zonal_op(project, zone, op.name, timeout=90)
 
-        # Boot + startup-script execution + traffic flow. The image pulls
-        # cloud-init and runs the script ~15-30s post-RUNNING; pings then
-        # take 10s; flow-log buffering adds 5-10s. 60s is comfortably enough.
-        time.sleep(60)
+        # Boot + startup-script + traffic flow. cloud-init runs the
+        # startup script ~5-15s after RUNNING; the ping loop takes 10s;
+        # flow-log buffering adds another ~5s. 20s gives ~5s margin under
+        # the tight 180s overall budget.
+        time.sleep(20)
 
         # ---- Poll Cloud Logging for scoped flow-log samples ----
         # Restrict the recency window to entries observed AFTER this step
@@ -270,9 +274,12 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
         packet_count = 0
         recent_ok = False
         recent_count = 0
-        # Cloud Logging end-to-end propagation for flow logs typically 30-60s,
-        # occasionally up to ~120s. 180s deadline, 15s interval.
-        poll_deadline = time.monotonic() + 180
+        # Cloud Logging flow-log propagation typically 15-45s for a fresh
+        # entry. 45s deadline with 10s interval fits under the 180s
+        # orchestrator cap (AWS oracle parity). A genuinely-slow GCP
+        # logging tier exceeds 45s and surfaces as a real test failure
+        # rather than being masked by a padded timeout.
+        poll_deadline = time.monotonic() + 45
         while time.monotonic() < poll_deadline:
             endpoint_ok, _ = _list_log_entries(endpoint_filter, max_results=1)
             perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
@@ -280,7 +287,7 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
             recent_ok, recent_count = _list_log_entries(endpoint_filter, max_results=5)
             if endpoint_ok and perf_count > 0 and packet_count > 0 and recent_count > 0:
                 break
-            time.sleep(15)
+            time.sleep(10)
 
         result["tests"]["metrics_endpoint_reachable"] = {"passed": endpoint_ok}
         result["tests"]["performance_metric_present"] = {
@@ -300,21 +307,30 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
+        # Capture the cleanup bool and AND it into the cleanup subtest so
+        # a leaked probe VM cannot read as cleanup success (AWS oracle
+        # parity; matches _audit_trail's stronger gate). Per-resource
+        # wait fits under the 180s orchestrator cap.
+        cleanup_ok = True
+        cleanup_error: str | None = None
         if probe_created:
             try:
-                delete_with_retry(
+                cleanup_ok = delete_with_retry(
                     lambda: wait_for_zonal_op(
                         project,
                         zone,
                         instances_c.delete(project=project, zone=zone, instance=probe_vm_name).name,
-                        timeout=120,
+                        timeout=60,
                     ),
                     resource_desc=f"probe instance {probe_vm_name}",
                 )
-            except Exception:
-                # Probe-VM cleanup failure is logged via classify_gcp_error
-                # by the calling teardown step; do NOT mask the main result.
-                pass
+            except Exception as e:
+                cleanup_ok = False
+                cleanup_error = str(e)
+    cleanup_test: dict[str, Any] = {"passed": cleanup_ok}
+    if cleanup_error:
+        cleanup_test["error"] = cleanup_error
+    result["tests"]["cleanup"] = cleanup_test
     result["success"] = bool(result["tests"]) and all(
         t.get("passed", False) for t in result["tests"].values()
     )

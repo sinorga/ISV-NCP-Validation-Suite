@@ -164,12 +164,13 @@ commands:
           - "{{steps.create_network.network_id}}"
           - "--aspect"
           - "latency_perf"
-        # Step body: subnet log_config readback + probe-VM insert (~90s)
-        # + 60s boot/traffic + Cloud Logging propagation poll (≤180s,
-        # 15s interval) + probe-VM delete (~120s). 600s gives ~150s
-        # headroom for slow-API days while staying in the documented
-        # ≤2× AWS-oracle cap discipline (oracle: 300s).
-        timeout: 600
+        # Cap pinned to the AWS oracle (sdn_latency_perf_logging:180s).
+        # Every individual wait inside the step body fits inside this
+        # cap: probe-VM insert wait ≤90s, boot/flow sleep 20s, Cloud
+        # Logging poll deadline 45s, probe-VM delete wait ≤60s. CAP not
+        # SUM — a hung step must SIGKILL at 180s rather than being
+        # masked by a padded total budget.
+        timeout: 180
 
       - name: sdn_filter_audit_trail
         phase: test
@@ -298,32 +299,33 @@ commands:
         timeout: 240 # see "GCP timeout: 240" header comment at top of file
         output_schema: vpc_peering
 
-      # nvlink_domain is registered but `skip: true` by default for public
-      # GCP. The released `NvlinkDomainCheck` requires either (a) a real
-      # non-NVLink Compute Engine instance to emit `nvlink_supported=false`
-      # for the explicit-skip path, or (b) an NVLink-capable instance with
-      # a verified guest topology probe (`nvidia-smi topo`) — public Compute
-      # Engine APIs do NOT expose an NVLink domain identifier. The default
-      # setup does NOT create such a node (would incur GPU quota/cost), and
-      # an unresolved `--node-id` is a hard `node_resolved=False` failure per
-      # knowledge ("absence-of-VM is a different outcome from non-NVLink-shape").
-      # Skipping surfaces a STEP_NOT_CONFIGURED gap to the operator report
-      # explicitly rather than failing with a magic literal. Re-enable by
-      # setting `skip: false` and overriding `--node-id` to a live instance
-      # in your project (operator-provided knob).
+      # nvlink_domain is RUN by default for public GCP. The released
+      # `NvlinkDomainCheck` validator requires a real Compute Engine
+      # instance for the guest_accelerators readback. Default GCP projects
+      # have no NVLink-capable node (GPU quota gated), so the stub launches
+      # a tiny e2-small probe VM into the shared `--vpc-id`, inspects its
+      # accelerator metadata (empty for e2-small), emits
+      # `nvlink_supported=false`, and the released validator pytest.skips
+      # cleanly via the documented non-NVLink path. Operators with a real
+      # NVLink-capable instance can override `--node-id`; in that case the
+      # stub resolves the instance via aggregated-list and (in a future
+      # change) drives an in-guest `nvidia-smi topo` probe instead of the
+      # ephemeral e2-small probe.
       - name: nvlink_domain
         phase: test
-        skip: true
         command: "python3 ../scripts/network/nvlink_domain_test.py"
         args:
           - "--region"
           - "{{region}}"
-          - "--node-id"
-          - "compute-node-1"
-        # Metadata-only probe (aggregated-list InstancesClient lookup +
-        # guestAccelerators inspection). No resource creation, no waits.
-        # 60s matches the my-isv template ceiling for the same step.
-        timeout: 60
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+        # Step body: probe-VM insert (~30-90s wait_for_zonal_op timeout=120)
+        # + aggregated_list / get readback (<5s) + probe-VM delete
+        # (~30-90s wait_for_zonal_op timeout=120). 240s keeps the cap
+        # within the documented GCP timeout policy (≤2× AWS oracle; AWS
+        # does not ship this step, so we use the same 240s ceiling as
+        # other VM-create-bearing GCP steps).
+        timeout: 240
         output_schema: nvlink_domain
 
       # backend_switch_fabric is registered as a contract-explicit
