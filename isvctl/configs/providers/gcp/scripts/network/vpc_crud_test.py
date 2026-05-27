@@ -360,24 +360,24 @@ def main() -> int:
     # This guarantees the finally block tears the accepted-but-not-DONE
     # network down even if the wait itself raised.
     tracker: dict[str, bool] = {"created": False}
+    cleanup_errors: list[str] = []
     try:
         result["tests"]["create_vpc"] = test_create_vpc(project, name, tracker)
-        if not result["tests"]["create_vpc"]["passed"]:
-            print(json.dumps(result, indent=2))
-            return 1
+        if result["tests"]["create_vpc"]["passed"]:
+            result["tests"]["read_vpc"] = test_read_vpc(project, name)
+            result["tests"]["update_tags"] = test_update_tags(project, name)
+            result["tests"]["update_dns"] = test_update_dns(project, name)
+            result["tests"]["delete_vpc"] = test_delete_vpc(project, name)
+            if result["tests"]["delete_vpc"]["passed"]:
+                tracker["created"] = False
 
-        result["tests"]["read_vpc"] = test_read_vpc(project, name)
-        result["tests"]["update_tags"] = test_update_tags(project, name)
-        result["tests"]["update_dns"] = test_update_dns(project, name)
-        result["tests"]["delete_vpc"] = test_delete_vpc(project, name)
-        if result["tests"]["delete_vpc"]["passed"]:
-            tracker["created"] = False
-
-        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+            result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+        else:
+            result["error"] = "create_vpc failed; downstream CRUD steps skipped"
     finally:
         if tracker["created"]:
             networks = compute_v1.NetworksClient()
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
                     _with_readiness_retry(lambda: networks.delete(project=project, network=name)).name,
@@ -385,6 +385,11 @@ def main() -> int:
                 ),
                 resource_desc=f"network {name}",
             )
+            if not ok:
+                cleanup_errors.append(f"network {name}: delete_with_retry returned False")
+
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
