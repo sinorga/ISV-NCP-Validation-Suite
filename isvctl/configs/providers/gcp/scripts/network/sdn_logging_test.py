@@ -317,13 +317,10 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
             "sample_window_seconds": sample_window,
             "matching_entries": recent_count,
         }
+        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
-        # Capture the cleanup bool and AND it into the cleanup subtest so
-        # a leaked probe VM cannot read as cleanup success (AWS oracle
-        # parity; matches _audit_trail's stronger gate). Per-resource
-        # wait fits under the 180s orchestrator cap.
         cleanup_ok = True
         cleanup_error: str | None = None
         if probe_created:
@@ -344,7 +341,7 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
     if cleanup_error:
         cleanup_test["error"] = cleanup_error
     result["tests"]["cleanup"] = cleanup_test
-    result["success"] = bool(result["tests"]) and all(t.get("passed", False) for t in result["tests"].values())
+    result["success"] = result.get("success", False) and cleanup_ok
     return result
 
 
