@@ -144,7 +144,7 @@ def main() -> int:
         # instance left behind when we never got SSH. Happy-path leaves the
         # instance for the teardown step (per dhcp_ip_test divergence note).
         if instance_created:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda: wait_for_zonal_op(
                     project,
                     zone,
@@ -153,6 +153,11 @@ def main() -> int:
                 ),
                 resource_desc=f"instance {name}",
             )
+            # Failure-path leak: the instance create-DONE happened but
+            # cleanup couldn't remove it. Surface so the operator sees the
+            # leftover instead of a silent leak.
+            if not ok:
+                result["cleanup_error"] = f"instance {name}: delete_with_retry returned False on failure path"
 
     # Note: on the happy path we LEAVE the instance running so the validator
     # (DhcpIpManagementCheck) can SSH in. The teardown step is responsible

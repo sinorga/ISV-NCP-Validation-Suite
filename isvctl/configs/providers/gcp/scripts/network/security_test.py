@@ -46,7 +46,8 @@ def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) 
         ),
     )
     cleanup.append(("network", name))
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap fits the 240s step timeout (network.yaml security_blocking).
+    wait_for_global_op(project, op.name, timeout=180)
 
 
 def _insert_firewall(project: str, fw: compute_v1.Firewall) -> None:
@@ -72,6 +73,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     try:
         _insert_network(project, network_name, cleanup=cleanup)
 
@@ -212,7 +214,7 @@ def main() -> int:
     finally:
         for kind, n in reversed(cleanup):
             if kind == "firewall":
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda nn=n: wait_for_global_op(
                         project,
                         firewalls.delete(project=project, firewall=nn).name,
@@ -221,7 +223,7 @@ def main() -> int:
                     resource_desc=f"firewall {n}",
                 )
             else:
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda nn=n: wait_for_global_op(
                         project,
                         networks.delete(project=project, network=nn).name,
@@ -229,6 +231,10 @@ def main() -> int:
                     ),
                     resource_desc=f"network {n}",
                 )
+            if not ok:
+                cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result["success"] and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

@@ -164,6 +164,7 @@ def main() -> int:
 
     created_names: list[str] = []
     keypair_paths: list[tuple[str, str]] = []  # (priv, pub)
+    cleanup_errors: list[str] = []
     try:
         # Two instances on the same subnet so we can ping.
         keypair = generate_ssh_keypair(unique_suffix("conn-key"))
@@ -224,7 +225,7 @@ def main() -> int:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for name in created_names:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda n=name: wait_for_zonal_op(
                     project,
                     zone,
@@ -233,6 +234,8 @@ def main() -> int:
                 ),
                 resource_desc=f"instance {name}",
             )
+            if not ok:
+                cleanup_errors.append(f"instance {name}: delete_with_retry returned False")
         for priv, pub in keypair_paths:
             for p in (priv, pub):
                 try:
@@ -240,6 +243,8 @@ def main() -> int:
                         os.remove(p)
                 except OSError:
                     pass
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

@@ -23,7 +23,6 @@ import ipaddress
 import json
 import os
 import sys
-import uuid
 from pathlib import Path
 from typing import Any
 
@@ -31,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from common.compute import (
     resolve_project,
+    unique_suffix,
     wait_for_global_op,
     wait_for_region_op,
 )
@@ -62,16 +62,11 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    # Per-attempt random suffix instead of RUN_ID — a prior run killed
-    # by sandbox timeout can leave the network in an unrecoverable
-    # ``is not ready`` state that blocks both delete and recreate, and
-    # GCE refuses to recreate a name immediately after delete-DONE
-    # (``OPERATION_CANCELED_BY_USER``). A fresh name per invocation
-    # sidesteps both failure modes; the network is short-lived (created
-    # + deleted within this script). High-entropy randomness also
-    # supersedes the ``-iso-`` discriminator that an upstream slice
-    # used to keep parallel workers from racing on a shared RUN_ID.
-    network_name = f"isv-subnets-{uuid.uuid4().hex[:8]}"
+    # Canonical RUN_ID-suffixed name so orphan sweepers can scope by
+    # run id. The 409/orphan-recovery path (`except gax.Conflict`
+    # below) deletes leftover subnetworks before recreating, so a
+    # killed prior run with the same RUN_ID is recoverable in-place.
+    network_name = unique_suffix("isv-subnets")
     subnet_cidrs = _carve(args.cidr, args.subnet_count)
 
     networks = compute_v1.NetworksClient()
@@ -92,6 +87,7 @@ def main() -> int:
 
     created_subnets: list[str] = []
     network_created = False
+    cleanup_errors: list[str] = []
     try:
         # Pre-clean any leftover network with the same RUN_ID-derived name
         # (e.g. from a prior failed run, or a parallel worker that crashed
@@ -146,7 +142,8 @@ def main() -> int:
                 ),
             )
         network_created = True
-        wait_for_global_op(project, op.name, timeout=300)
+        # Cap fits the 240s step timeout (network.yaml subnet_config).
+        wait_for_global_op(project, op.name, timeout=180)
         result["tests"]["create_vpc"] = {"passed": True, "vpc_id": network_name}
 
         zones = _list_region_zones(project, args.region)
@@ -167,7 +164,8 @@ def main() -> int:
             )
             op = subnets_client.insert(project=project, region=args.region, subnetwork_resource=sub)
             created_subnets.append(sub_name)
-            wait_for_region_op(project, args.region, op.name, timeout=300)
+            # Cap fits the 240s step timeout; subnet-create is usually <30s.
+            wait_for_region_op(project, args.region, op.name, timeout=180)
             subnets_emitted.append(
                 {
                     "subnet_id": sub_name,
@@ -213,7 +211,7 @@ def main() -> int:
         result["error_type"], result["error"] = et, em
     finally:
         for sub_name in created_subnets:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda n=sub_name: wait_for_region_op(
                     project,
                     args.region,
@@ -222,8 +220,10 @@ def main() -> int:
                 ),
                 resource_desc=f"subnetwork {sub_name}",
             )
+            if not ok:
+                cleanup_errors.append(f"subnetwork {sub_name}: delete_with_retry returned False")
         if network_created:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
                     networks.delete(project=project, network=network_name).name,
@@ -231,6 +231,10 @@ def main() -> int:
                 ),
                 resource_desc=f"network {network_name}",
             )
+            if not ok:
+                cleanup_errors.append(f"network {network_name}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result["success"] and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

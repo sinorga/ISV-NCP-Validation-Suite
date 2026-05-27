@@ -111,6 +111,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     keypair_paths: list[str] = []
     try:
         _insert_network(project, network, cleanup=cleanup)
@@ -260,7 +261,7 @@ def main() -> int:
         for kind, n in reversed(cleanup):
             try:
                 if kind == "instance":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_zonal_op(
                             project,
                             zone,
@@ -270,7 +271,7 @@ def main() -> int:
                         resource_desc=f"instance {n}",
                     )
                 elif kind == "firewall":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             firewalls.delete(project=project, firewall=nn).name,
@@ -279,7 +280,7 @@ def main() -> int:
                         resource_desc=f"firewall {n}",
                     )
                 elif kind == "subnet":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_region_op(
                             project,
                             args.region,
@@ -289,7 +290,7 @@ def main() -> int:
                         resource_desc=f"subnet {n}",
                     )
                 else:
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             networks.delete(project=project, network=nn).name,
@@ -297,14 +298,18 @@ def main() -> int:
                         ),
                         resource_desc=f"network {n}",
                     )
-            except Exception:
-                pass
+                if not ok:
+                    cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+            except Exception as e:
+                cleanup_errors.append(f"{kind} {n}: {e}")
         for p in keypair_paths:
             try:
                 if p and os.path.exists(p):
                     os.remove(p)
             except OSError:
                 pass
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

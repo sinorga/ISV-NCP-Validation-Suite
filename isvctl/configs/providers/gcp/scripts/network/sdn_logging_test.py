@@ -138,37 +138,45 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
     }
     try:
         # 1. Metrics endpoint reachable: smallest possible filter against
-        # the VPC Flow Logs log name.
+        # the VPC Flow Logs log name. Endpoint reachability is the only
+        # subtest that may legitimately pass on an empty result set —
+        # the others gate on observed samples.
         endpoint_ok, _ = _list_log_entries(flow_log_root, max_results=1)
         result["tests"]["metrics_endpoint_reachable"] = {"passed": endpoint_ok}
 
         # 2. Performance metric present: narrow to entries carrying the
         # bytes_sent / bytes_received fields the perf namespace uses.
+        # Empty result MUST NOT read as present (AWS oracle parity:
+        # SdnLatencyPerfLoggingCheck requires nonzero samples).
         perf_filter = flow_log_root + " AND jsonPayload.bytes_sent:*"
-        perf_ok, _ = _list_log_entries(perf_filter, max_results=5)
+        perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
         result["tests"]["performance_metric_present"] = {
-            "passed": perf_ok,
+            "passed": perf_ok and perf_count > 0,
             "namespace": LATENCY_NAMESPACE,
+            "matching_entries": perf_count,
         }
 
         # 3. Packet metric present: distinct narrow to packet-count fields.
+        # Same nonzero-entry gate as performance_metric_present.
         packet_filter = flow_log_root + " AND jsonPayload.packets_sent:*"
         packet_ok, flow_count = _list_log_entries(packet_filter, max_results=5)
         result["tests"]["packet_metric_present"] = {
-            "passed": packet_ok,
+            "passed": packet_ok and flow_count > 0,
             "flow_log_count": flow_count,
         }
 
         # 4. Samples recent: filter on the last N-second window so a stale
-        # log archive doesn't false-pass.
+        # log archive doesn't false-pass. Recency check is meaningless
+        # without at least one matching entry.
         from datetime import datetime, timedelta
 
         since = (datetime.now(UTC) - timedelta(seconds=sample_window)).isoformat()
         recent_filter = flow_log_root + f' AND timestamp>="{since}"'
-        recent_ok, _ = _list_log_entries(recent_filter, max_results=5)
+        recent_ok, recent_count = _list_log_entries(recent_filter, max_results=5)
         result["tests"]["samples_recent"] = {
-            "passed": recent_ok,
+            "passed": recent_ok and recent_count > 0,
             "sample_window_seconds": sample_window,
+            "matching_entries": recent_count,
         }
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"] = classify_gcp_error(e)[0]

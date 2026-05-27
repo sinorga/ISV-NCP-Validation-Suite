@@ -130,7 +130,6 @@ def _delete_network_resources(
     subnets_c = compute_v1.SubnetworksClient()
     routes_c = compute_v1.RoutesClient()
     networks_c = compute_v1.NetworksClient()
-    addresses_c = compute_v1.AddressesClient()
 
     # Instances first — aggregated list across all zones.
     try:
@@ -242,23 +241,18 @@ def _delete_network_resources(
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         print(f"WARN: subnet enumeration failed: {e}", file=sys.stderr)
 
-    # Addresses (regional) — only ours (label).
-    try:
-        for addr in addresses_c.list(project=project, region=region):
-            if (addr.labels or {}).get("createdby") == "isvtest":
-                ok = delete_with_retry(
-                    lambda nn=addr.name: wait_for_region_op(
-                        project,
-                        region,
-                        addresses_c.delete(project=project, region=region, address=nn).name,
-                        timeout=180,
-                    ),
-                    resource_desc=f"address {addr.name}",
-                )
-                successes.append(ok)
-                deleted["addresses"].append(addr.name)
-    except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        print(f"WARN: address enumeration failed: {e}", file=sys.stderr)
+    # Addresses are intentionally NOT swept here. Regional addresses are
+    # not attached to a specific network — `addresses.list` returns every
+    # address in the region, and a same-project parallel run (or an
+    # unrelated address minted with a `createdby=isvtest` label by a
+    # different ISV check) would be deleted by this teardown. The
+    # individual stubs that mint addresses (`floating_ip_test`,
+    # `stable_ip_test`, `byoip_test`) clean their own addresses in their
+    # own `finally` blocks (cleanup-bool propagated), so the shared
+    # network teardown only deletes network-scoped resources (instances,
+    # firewalls, routes, peerings, subnets, network).
+    # AWS oracle parity: aws/scripts/network/teardown.py scopes deletes
+    # to the input VPC.
 
     # Network last. Same readiness retry as subnets — a network can sit
     # in 'is not ready' state immediately after firewall/peering/route

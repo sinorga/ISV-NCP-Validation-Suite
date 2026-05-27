@@ -40,6 +40,7 @@ from common.compute import (
     narrow_region_to_zone,
     resolve_project,
     unique_suffix,
+    unique_tight_id,
     wait_for_global_op,
     wait_for_region_op,
     wait_for_zonal_op,
@@ -61,7 +62,8 @@ def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) 
         ),
     )
     cleanup.append(("network", name))
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap fits the 240s step timeout (network.yaml sg_*_scoping).
+    wait_for_global_op(project, op.name, timeout=180)
 
 
 def _insert_subnet(
@@ -143,7 +145,8 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
             ),
         )
         cleanup.append(("network", network))
-        wait_for_global_op(project, op.name, timeout=300)
+        # Cap fits the 240s step timeout (network.yaml sg_*_scoping).
+        wait_for_global_op(project, op.name, timeout=180)
 
         op = subnets_c.insert(
             project=project,
@@ -463,8 +466,11 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
          one with service_accounts=[] (explicit empty list).
       5. Derive each boolean from independent InstancesClient.get readbacks.
     """
-    suffix = unique_suffix("svc", length=4).split("-")[-1]
-    sa_id = f"isv-svcsc-{suffix}"
+    # GCP service-account local part is capped at 30 chars. The tight-namespace
+    # helper composes `<prefix>-<random-disc>-<runid-fragment>` so a same-RUN_ID
+    # retry (SA soft-delete reserves the name for ~30 days) does not collide
+    # while still leaving an operator-visible suffix that ties back to the run.
+    sa_id = unique_tight_id("isv-svcsc", max_len=30, runid_len=4, disc_len=8)
     network = unique_suffix("isv-svcn")
     sub = unique_suffix("isv-svcsn")
     fw = unique_suffix("isv-svcfw")
@@ -628,23 +634,36 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
         cleanup.append(("instance", name_other))
         wait_for_zonal_op(project, zone, op.name, timeout=600)
 
-        # Independent readbacks per VM. The "allowed" VM's service_accounts
-        # must include sa_email; the "other" VM's service_accounts list must
-        # be empty (the firewall's targetServiceAccounts cannot apply to a
-        # VM with no service account attached).
+        # Independent readbacks per VM PLUS firewall readback. The
+        # service-scope contract requires BOTH:
+        #   1. The firewall actually targets this SA (`target_service_accounts
+        #      == [sa_email]`) — confirms the scoping object exists in the
+        #      shape we asked for, not just that a generic firewall was
+        #      created.
+        #   2. The VM's own service_accounts list matches/excludes the SA —
+        #      confirms membership/non-membership of the scope.
+        # Without (1) the step can pass even when the firewall was created
+        # without targetServiceAccounts (e.g., API silently dropped the
+        # field). AWS oracle parity: SgServiceScopingCheck looks at both
+        # the ENI attachment AND the SG's targeting.
         a_obj = instances_c.get(project=project, zone=zone, instance=name_allowed)
         o_obj = instances_c.get(project=project, zone=zone, instance=name_other)
+        fw_readback = firewalls_c.get(project=project, firewall=fw)
+        fw_target_sas = list(fw_readback.target_service_accounts or ())
+        firewall_scoped = fw_target_sas == [sa_email]
         a_sa_emails = [s.email for s in a_obj.service_accounts or ()]
         o_sa_emails = [s.email for s in o_obj.service_accounts or ()]
         result["tests"]["service_endpoint_allowed"] = {
-            "passed": sa_email in a_sa_emails,
+            "passed": firewall_scoped and sa_email in a_sa_emails,
             "vm": name_allowed,
             "service_accounts": a_sa_emails,
+            "firewall_target_service_accounts": fw_target_sas,
         }
         result["tests"]["other_endpoint_blocked"] = {
-            "passed": sa_email not in o_sa_emails,
+            "passed": firewall_scoped and sa_email not in o_sa_emails,
             "vm": name_other,
             "service_accounts": o_sa_emails,
+            "firewall_target_service_accounts": fw_target_sas,
         }
         result["success"] = all(t.get("passed", False) for t in result["tests"].values())
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:

@@ -307,6 +307,32 @@ commands:
         timeout: 60
         output_schema: nvlink_domain
 
+      # backend_switch_fabric is documented as a contract-explicit
+      # EXCLUSION for public GCP. Public Compute Engine APIs do not
+      # expose backend leaf/spine/core switch identifiers for VM hosts
+      # (`.factory/context/ncp-knowledge/gcp/network.yaml`
+      # `backend_switch_fabric` classification=gap,
+      # exclude_recommended=true). Fabricating switch IDs would violate
+      # the validator's "real provider metadata only; never demo
+      # literals" contract. The step is registered (so the exclusion is
+      # discoverable) but `skip: true` keeps it from running — the
+      # validator framework then surfaces a `STEP_NOT_CONFIGURED` skip
+      # against `BackendSwitchFabricCheck` so the operator report shows
+      # the gap explicitly rather than silently no-op'ing.
+      # Re-enable only when the operator wires a private/internal
+      # topology API able to return real switch IDs.
+      - name: backend_switch_fabric
+        phase: test
+        skip: true
+        command: "python3 ../scripts/network/backend_switch_fabric_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--node-id"
+          - "compute-node-1"
+        timeout: 60
+        output_schema: backend_switch_fabric
+
       - name: teardown
         phase: teardown
         command: "python3 ../scripts/network/teardown.py"

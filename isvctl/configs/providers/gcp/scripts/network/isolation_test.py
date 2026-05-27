@@ -62,10 +62,12 @@ def _insert_network(project: str, name: str, *, cleanup: list[str]) -> None:
                 f"network {name!r} exists in {project} without ISV ownership marker; refusing to adopt"
             ) from None
         del_op = networks.delete(project=project, network=name)
-        wait_for_global_op(project, del_op.name, timeout=300)
+        # Cap fits the 240s step timeout (network.yaml vpc_isolation).
+        wait_for_global_op(project, del_op.name, timeout=120)
         op = networks.insert(project=project, network_resource=_build())
     cleanup.append(name)
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap fits the 240s step timeout (network.yaml vpc_isolation).
+    wait_for_global_op(project, op.name, timeout=180)
 
 
 def _cidrs_overlap(a: str, b: str) -> bool:
@@ -115,6 +117,7 @@ def main() -> int:
         "region": args.region,
     }
     created: list[str] = []
+    cleanup_errors: list[str] = []
 
     try:
         _insert_network(project, name_a, cleanup=created)
@@ -186,7 +189,7 @@ def main() -> int:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for n in created:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda nn=n: wait_for_global_op(
                     project,
                     networks.delete(project=project, network=nn).name,
@@ -194,6 +197,10 @@ def main() -> int:
                 ),
                 resource_desc=f"network {n}",
             )
+            if not ok:
+                cleanup_errors.append(f"network {n}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result["success"] and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

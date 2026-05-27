@@ -29,7 +29,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, wait_for_global_op
+from common.compute import resolve_project, unique_suffix, wait_for_global_op
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -118,7 +118,7 @@ def _insert_network(
                 pass
         try:
             del_op = _with_readiness_retry(lambda: networks.delete(project=project, network=name))
-            wait_for_global_op(project, del_op.name, timeout=300)
+            wait_for_global_op(project, del_op.name, timeout=120)
         except gax.NotFound:
             pass
 
@@ -137,7 +137,8 @@ def _insert_network(
         if on_dispatch is not None and attempt == 1:
             on_dispatch()
         try:
-            wait_for_global_op(project, op.name, timeout=300)
+            # Cap fits the 240s step timeout (network.yaml vpc_crud).
+            wait_for_global_op(project, op.name, timeout=180)
             return
         except RuntimeError as e:
             last_err = e
@@ -310,7 +311,7 @@ def test_delete_vpc(project: str, name: str) -> dict[str, Any]:
         # networks.delete also hits the post-mutation "is not ready" 400
         # window — retry until the resource is ready or the budget is gone.
         op = _with_readiness_retry(lambda: networks.delete(project=project, network=name))
-        wait_for_global_op(project, op.name, timeout=300)
+        wait_for_global_op(project, op.name, timeout=120)
         time.sleep(1)
         try:
             networks.get(project=project, network=name)
@@ -332,18 +333,12 @@ def main() -> int:
     args = parser.parse_args()
 
     project = resolve_project(args.project)
-    # Per-attempt random suffix instead of RUN_ID — Compute Engine refuses
-    # to recreate a network name immediately after delete-DONE (returns
-    # ``OPERATION_CANCELED_BY_USER`` with empty user attribution on the
-    # async insert), and a prior aborted run can also leave the
-    # RUN_ID-suffixed name in an unrecoverable ``is not ready`` state
-    # that blocks delete + recreate. A fresh name per invocation
-    # sidesteps both failure modes; the network is short-lived (created
-    # + deleted within this script) so per-attempt entropy is safe.
-    # High-entropy randomness also supersedes the ``-iso-`` discriminator
-    # that an upstream slice used to keep parallel workers from racing on
-    # a shared RUN_ID.
-    name = f"isv-crud-{uuid.uuid4().hex[:8]}"
+    # Canonical RUN_ID-suffixed name so orphan sweepers (`gcloud compute
+    # networks list --filter "name~$RUN_ID"`) can scope to this session.
+    # The 409/OPERATION_CANCELED recovery path lives in `_insert_network`
+    # (verified-reuse adopt + delete + readiness-retry), so collision
+    # with a prior killed run's leftover is recoverable in-place.
+    name = unique_suffix("isv-crud")
 
     result: dict[str, Any] = {
         "success": False,

@@ -110,6 +110,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     peerings_added: list[tuple[str, str]] = []  # (network, peering_name)
     try:
         _insert_network(project, name_a, cleanup=cleanup)
@@ -223,7 +224,7 @@ def main() -> int:
         result["error_type"], result["error"] = classify_gcp_error(e)
     finally:
         for net, peering in peerings_added:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda n=net, p=peering: wait_for_global_op(
                     project,
                     networks_c.remove_peering(
@@ -235,10 +236,12 @@ def main() -> int:
                 ),
                 resource_desc=f"peering {peering} from {net}",
             )
+            if not ok:
+                cleanup_errors.append(f"peering {peering} on {net}: delete_with_retry returned False")
         for kind, n in reversed(cleanup):
             try:
                 if kind == "subnet":
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_region_op(
                             project,
                             args.region,
@@ -248,7 +251,7 @@ def main() -> int:
                         resource_desc=f"subnet {n}",
                     )
                 else:
-                    delete_with_retry(
+                    ok = delete_with_retry(
                         lambda nn=n: wait_for_global_op(
                             project,
                             networks_c.delete(project=project, network=nn).name,
@@ -256,8 +259,12 @@ def main() -> int:
                         ),
                         resource_desc=f"network {n}",
                     )
-            except Exception:
-                pass
+                if not ok:
+                    cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+            except Exception as e:
+                cleanup_errors.append(f"{kind} {n}: {e}")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
