@@ -217,6 +217,12 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     peering_name = f"crud-peer-{attempt}"
     peering_observed = False
     cleanup_errors: list[str] = []
+    # Tracker for peerings added to the MAIN VPC (name). Stamped immediately
+    # after add_peering dispatches and BEFORE wait_for_global_op so a failing
+    # wait still triggers remove_peering on the main VPC during cleanup.
+    # Without this, an accepted-but-not-DONE peering would leak on the main
+    # VPC and block its later delete (sibling pattern: peering_test.py:137).
+    peerings_on_main: list[str] = []
     try:
         _insert_network(
             project,
@@ -236,6 +242,7 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
                 ),
             )
         )
+        peerings_on_main.append(peering_name)
         wait_for_global_op(project, op.name, timeout=180)
         net = networks.get(project=project, network=name)
         names = {p.name for p in net.peerings or ()}
@@ -250,11 +257,36 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
             network=name,
             networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=peering_name),
         )
+        # Untrack on successful inline removal dispatch so finally does not
+        # double-remove (the wait below may still fail, but remove_peering
+        # is idempotent w.r.t. an already-removed peering — finally catches
+        # any leftover via the membership check on the live network read).
+        peerings_on_main.remove(peering_name)
         wait_for_global_op(project, op.name, timeout=180)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
         cleanup_errors.append(f"peering add/remove: {e}")
     finally:
+        # Remove any peerings tracked on the main VPC BEFORE deleting the
+        # peer network, otherwise the main VPC retains a peering pointing
+        # at the deleted peer and its own delete fails downstream.
+        for pname in list(peerings_on_main):
+            ok = delete_with_retry(
+                lambda pp=pname: wait_for_global_op(
+                    project,
+                    networks.remove_peering(
+                        project=project,
+                        network=name,
+                        networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=pp),
+                    ).name,
+                    timeout=180,
+                ),
+                resource_desc=f"peering {pname} on main vpc {name}",
+            )
+            if not ok:
+                cleanup_errors.append(
+                    f"peering {pname} on main vpc {name}: delete_with_retry returned False"
+                )
         if peer_tracker["created"]:
             ok = delete_with_retry(
                 lambda: wait_for_global_op(

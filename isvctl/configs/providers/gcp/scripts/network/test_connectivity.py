@@ -256,13 +256,18 @@ def main() -> int:
             )
             if not ok:
                 cleanup_errors.append(f"instance {name}: delete_with_retry returned False")
+        # Local key file unlink failures must AND into cleanup.passed —
+        # swallowing OSError would leave private key material on disk
+        # while the step still reported success (AWS oracle parity at
+        # aws/scripts/network/teardown.py local PEM unlink; test-quality
+        # rule #6 on cleanup provenance).
         for priv, pub in keypair_paths:
             for p in (priv, pub):
                 try:
                     if p and os.path.exists(p):
                         os.remove(p)
-                except OSError:
-                    pass
+                except OSError as e:
+                    cleanup_errors.append(f"local key file {p}: {e}")
     result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
     result["success"] = result.get("success", False) and not cleanup_errors
 

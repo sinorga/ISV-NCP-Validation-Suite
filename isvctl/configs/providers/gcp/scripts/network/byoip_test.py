@@ -97,6 +97,7 @@ def main() -> int:
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
     cleanup_errors: list[str] = []
+    sub_s: str | None = None
     try:
         net_c, sub_c = _create_pair(project, args.region, "byo-c", custom_sub_cidr, cleanup=cleanup)
         result["tests"]["custom_cidr_create"] = {
@@ -113,21 +114,40 @@ def main() -> int:
             "state": "READY",
         }
 
-        net_s, _ = _create_pair(project, args.region, "byo-s", standard_sub_cidr, cleanup=cleanup)
+        net_s, sub_s = _create_pair(project, args.region, "byo-s", standard_sub_cidr, cleanup=cleanup)
         result["tests"]["standard_cidr_create"] = {
             "passed": True,
             "vpc_id": net_s,
             "cidr": standard_sub_cidr,
         }
 
-        # no_conflict — the two subnets do not overlap.
-        a = ipaddress.ip_network(custom_sub_cidr)
-        b = ipaddress.ip_network(standard_sub_cidr)
-        result["tests"]["no_conflict"] = {
-            "passed": not a.overlaps(b),
-            "cidr_a": custom_sub_cidr,
-            "cidr_b": standard_sub_cidr,
-        }
+        # no_conflict — derive from provider readback of BOTH subnetworks
+        # (AWS oracle parity at aws/scripts/network/byoip_test.py
+        # test_no_conflict, which reads VPCs back via describe_vpcs).
+        # Reading observed `ip_cidr_range` catches a mis-created or
+        # unexpectedly-ranged subnet that local CIDR variables would not.
+        nc_result: dict[str, Any] = {"passed": False}
+        try:
+            sub_c_obs = subnets_c.get(project=project, region=args.region, subnetwork=sub_c)
+            sub_s_obs = subnets_c.get(project=project, region=args.region, subnetwork=sub_s)
+            observed_a = sub_c_obs.ip_cidr_range
+            observed_b = sub_s_obs.ip_cidr_range
+            net_a = ipaddress.ip_network(observed_a)
+            net_b = ipaddress.ip_network(observed_b)
+            nc_result["cidr_a"] = observed_a
+            nc_result["cidr_b"] = observed_b
+            if observed_a != custom_sub_cidr:
+                nc_result["error"] = f"subnet {sub_c} cidr drift: expected {custom_sub_cidr}, got {observed_a}"
+            elif observed_b != standard_sub_cidr:
+                nc_result["error"] = f"subnet {sub_s} cidr drift: expected {standard_sub_cidr}, got {observed_b}"
+            elif net_a.overlaps(net_b):
+                nc_result["error"] = f"observed CIDRs overlap: {observed_a} vs {observed_b}"
+            else:
+                nc_result["passed"] = True
+                nc_result["message"] = f"observed CIDRs distinct: {observed_a} vs {observed_b}"
+        except gax.NotFound as e:
+            nc_result["error"] = f"subnet readback NotFound: {e}"
+        result["tests"]["no_conflict"] = nc_result
 
         # custom_cidr_subnet — custom subnet already created as part of pair.
         result["tests"]["custom_cidr_subnet"] = {
