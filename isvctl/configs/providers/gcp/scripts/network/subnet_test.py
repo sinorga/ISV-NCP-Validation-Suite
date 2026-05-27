@@ -89,17 +89,6 @@ def main() -> int:
     network_created = False
     cleanup_errors: list[str] = []
     try:
-        # Pre-clean any leftover network with the same RUN_ID-derived name
-        # (e.g. from a prior failed run, or a parallel worker that crashed
-        # before its own teardown). NotFound-tolerant via delete_with_retry.
-        delete_with_retry(
-            lambda: wait_for_global_op(
-                project,
-                networks.delete(project=project, network=network_name).name,
-                timeout=180,
-            ),
-            resource_desc=f"pre-clean stale network {network_name}",
-        )
         # Setup network. Stamp the tracker BEFORE the wait so a wait failure
         # still surfaces the partial-create graph to the cleanup finally.
         # Compute Engine resource names are scoped to (project, RUN_ID[:8])
@@ -107,6 +96,9 @@ def main() -> int:
         # an orphan network behind. Verified-reuse it via the ISV
         # description marker so the same RUN_ID can recover its own
         # leftovers; refuse to adopt a name owned by something else.
+        # The 409 branch below is the ONLY delete-then-recreate path; never
+        # issue an unconditional pre-clean delete without first reading the
+        # network and verifying ISV ownership.
         try:
             op = networks.insert(
                 project=project,

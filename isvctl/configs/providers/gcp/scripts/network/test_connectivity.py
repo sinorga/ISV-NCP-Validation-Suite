@@ -48,7 +48,7 @@ SSH_USER = "isvtest"
 # Must match create_vpc.py PROVENANCE_TAG — create_vpc emits a firewall
 # whose `target_tags` is gated on this tag, so probe VMs MUST carry it
 # for the SSH-22 ingress rule to apply. Untagged VMs are firewall-blocked
-# and wait_for_ssh times out (run 28492c99 evidence).
+# and wait_for_ssh times out.
 
 
 def _validate_vpc(
@@ -166,7 +166,9 @@ def main() -> int:
     keypair_paths: list[tuple[str, str]] = []  # (priv, pub)
     cleanup_errors: list[str] = []
     try:
-        # Two instances on the same subnet so we can ping.
+        # Probe instances across distinct forwarded subnets so the ping
+        # exercises the cross-subnet routing/firewall path (AWS oracle
+        # parity: launches across subnet_ids[:2]).
         keypair = generate_ssh_keypair(unique_suffix("conn-key"))
         if isinstance(keypair, tuple):
             priv_path = keypair[0]
@@ -175,10 +177,14 @@ def main() -> int:
         pubkey = read_ssh_pubkey(priv_path)
         keypair_paths.append((priv_path, priv_path + ".pub"))
 
+        # Launch across the first two forwarded subnets so the test exercises
+        # the cross-subnet routing/firewall path, not just same-subnet traffic.
+        # Falls back to subnet[0] only when a single subnet was forwarded.
+        probe_subnets = subnet_ids[:2] if len(subnet_ids) >= 2 else [subnet_ids[0], subnet_ids[0]]
         instance_metadata: list[dict[str, Any]] = []
-        for i in range(2):
+        for i, requested_subnet in enumerate(probe_subnets):
             name = unique_suffix(f"isv-conn-{i}")
-            inst = _build_instance(project, zone, name, args.vpc_id, subnet_ids[0], args.region, pubkey)
+            inst = _build_instance(project, zone, name, args.vpc_id, requested_subnet, args.region, pubkey)
             op = instances_client.insert(project=project, zone=zone, instance_resource=inst)
             created_names.append(name)
             wait_for_zonal_op(project, zone, op.name, timeout=600)
@@ -186,10 +192,17 @@ def main() -> int:
             inst_read = instances_client.get(project=project, zone=zone, instance=name)
             ipub = first_external_ip(inst_read)
             ipriv = first_internal_ip(inst_read)
+            # Record the readback subnet (short name from the NIC URL) so a
+            # downstream validator sees the actual subnet the VM landed on.
+            readback_subnet = requested_subnet
+            if inst_read.network_interfaces:
+                sub_url = inst_read.network_interfaces[0].subnetwork or ""
+                if sub_url:
+                    readback_subnet = sub_url.rsplit("/", 1)[-1]
             instance_metadata.append(
                 {
                     "instance_id": name,
-                    "subnet_id": subnet_ids[0],
+                    "subnet_id": readback_subnet,
                     "private_ip": ipriv,
                     "public_ip": ipub,
                     "vpc_id": args.vpc_id,

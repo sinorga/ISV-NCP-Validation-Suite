@@ -44,30 +44,48 @@ LATENCY_NAMESPACE = "compute.googleapis.com/instance/network"
 AUDIT_LOG_NAME = "cloudaudit.googleapis.com/activity"
 
 
-def _list_log_entries(filter_str: str, max_results: int = 50) -> tuple[bool, int]:
+def _list_log_entries(project: str, filter_str: str, max_results: int = 50) -> tuple[bool, int]:
     """Return (reachable, count). reachable=False when google-cloud-logging
-    is not installed OR the API call raises."""
+    is not installed OR the API call raises.
+
+    ``project`` must be the operator-resolved GCP project; the Cloud Logging
+    client and ``resource_names`` are both pinned to it so a run whose
+    ``--project`` differs from the ADC default project does not silently
+    query the wrong logging scope.
+    """
     try:
         from google.cloud import logging_v2  # type: ignore[attr-defined]
     except ImportError:
         return False, 0
-    client = logging_v2.Client()
+    client = logging_v2.Client(project=project)
     count = 0
-    for _ in client.list_entries(filter_=filter_str, page_size=max_results, max_results=max_results):
+    for _ in client.list_entries(
+        resource_names=[f"projects/{project}"],
+        filter_=filter_str,
+        page_size=max_results,
+        max_results=max_results,
+    ):
         count += 1
     return True, count
 
 
-def _iter_log_entries(filter_str: str, max_results: int = 50):
+def _iter_log_entries(project: str, filter_str: str, max_results: int = 50):
     """Yield raw entries for the filter, or empty iterator on import/API
     failure. The caller is expected to inspect ``payload``/``method_name``
-    fields directly."""
+    fields directly. The logging client and ``resource_names`` are pinned
+    to the operator-resolved ``project``.
+    """
     try:
         from google.cloud import logging_v2  # type: ignore[attr-defined]
     except ImportError:
         return
-    client = logging_v2.Client()
-    yield from client.list_entries(filter_=filter_str, page_size=max_results, max_results=max_results)
+    client = logging_v2.Client(project=project)
+    yield from client.list_entries(
+        resource_names=[f"projects/{project}"],
+        filter_=filter_str,
+        page_size=max_results,
+        max_results=max_results,
+    )
 
 
 def _hardware_faults(project: str, network: str) -> dict[str, Any]:
@@ -88,19 +106,19 @@ def _hardware_faults(project: str, network: str) -> dict[str, Any]:
     try:
         # 1. Logging endpoint reachable: tightest possible filter
         # (page_size=1) — proves the Cloud Logging API can be called.
-        endpoint_ok, _ = _list_log_entries(base_log, max_results=1)
+        endpoint_ok, _ = _list_log_entries(project, base_log, max_results=1)
         result["tests"]["logging_endpoint_reachable"] = {"passed": endpoint_ok}
 
         # 2. Fault-event source queryable: filter narrowing to host_event_*
         # method names.
         source_filter = base_log + ' AND protoPayload.methodName:"host_event"'
-        source_ok, _ = _list_log_entries(source_filter, max_results=5)
+        source_ok, _ = _list_log_entries(project, source_filter, max_results=5)
         result["tests"]["fault_event_source_queryable"] = {"passed": source_ok}
 
         # 3. Log destination configured: verify the canonical log name
         # resolves (a non-existent log returns NOT_FOUND on the list call).
         dest_filter = base_log
-        dest_ok, _ = _list_log_entries(dest_filter, max_results=1)
+        dest_ok, _ = _list_log_entries(project, dest_filter, max_results=1)
         result["tests"]["log_destination_configured"] = {
             "passed": dest_ok,
             "log_destination": HARDWARE_LOG_NAME,
@@ -110,7 +128,7 @@ def _hardware_faults(project: str, network: str) -> dict[str, Any]:
         # (verifies the protoPayload schema by attempting to filter on a
         # nested-field path).
         schema_filter = base_log + ' AND protoPayload.methodName:"hostError"'
-        schema_ok, count = _list_log_entries(schema_filter, max_results=5)
+        schema_ok, count = _list_log_entries(project, schema_filter, max_results=5)
         result["tests"]["event_schema_valid"] = {
             "passed": schema_ok,
             "event_count": count,
@@ -281,10 +299,10 @@ def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
         # rather than being masked by a padded timeout.
         poll_deadline = time.monotonic() + 45
         while time.monotonic() < poll_deadline:
-            endpoint_ok, _ = _list_log_entries(endpoint_filter, max_results=1)
-            perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
-            packet_ok, packet_count = _list_log_entries(packet_filter, max_results=5)
-            recent_ok, recent_count = _list_log_entries(endpoint_filter, max_results=5)
+            endpoint_ok, _ = _list_log_entries(project, endpoint_filter, max_results=1)
+            perf_ok, perf_count = _list_log_entries(project, perf_filter, max_results=5)
+            packet_ok, packet_count = _list_log_entries(project, packet_filter, max_results=5)
+            recent_ok, recent_count = _list_log_entries(project, endpoint_filter, max_results=5)
             if endpoint_ok and perf_count > 0 and packet_count > 0 and recent_count > 0:
                 break
             time.sleep(10)
@@ -400,7 +418,7 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
         base = f'logName="projects/{project}/logs/{audit_log_id_encoded}" AND protoPayload.resourceName:"{fw_name}"'
         while time.monotonic() < deadline and not all(seen.values()):
             try:
-                entries = list(_iter_log_entries(base, max_results=50))
+                entries = list(_iter_log_entries(project, base, max_results=50))
                 reachable = True
             except (gax.GoogleAPICallError, RuntimeError, TimeoutError):
                 entries = []
