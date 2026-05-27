@@ -21,7 +21,6 @@ import ipaddress
 import json
 import os
 import sys
-import time
 from pathlib import Path
 from typing import Any
 
@@ -42,7 +41,7 @@ from common.compute import (
     wait_for_zonal_op,
 )
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
-from common.ssh_utils import ssh_run, wait_for_ssh
+from common.ssh_utils import parse_ping_avg_ms, ssh_run, wait_for_ssh
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
@@ -234,11 +233,16 @@ def main() -> int:
             result["tests"]["ssm_ready"] = {"passed": True, "message": "ssh-ready"}
 
             # traffic_allowed — A → B ping. ssh_run returns (rc, stdout, stderr).
+            # AWS-oracle parity: latency_ms is the parsed ping average RTT,
+            # not SSH orchestration wall-clock. Subtest passes only when
+            # ping succeeded AND a latency value was parsed from stdout.
             b_priv = instances_data[names[1]]["private_ip"]
-            t0 = time.time()
-            rc, _, _ = ssh_run(a_ip, SSH_USER, priv, f"ping -c 3 -W 3 {b_priv}")
-            latency_ms = round((time.time() - t0) * 1000, 1)
-            result["tests"]["traffic_allowed"] = {"passed": rc == 0, "latency_ms": latency_ms}
+            rc, out, _ = ssh_run(a_ip, SSH_USER, priv, f"ping -c 3 -W 3 {b_priv}")
+            latency_ms = parse_ping_avg_ms(out)
+            result["tests"]["traffic_allowed"] = {
+                "passed": rc == 0 and latency_ms is not None,
+                "latency_ms": latency_ms,
+            }
 
             # traffic_blocked — A → C ping should fail (C has deny-tag, no ICMP allow).
             c_priv = instances_data[names[2]]["private_ip"]

@@ -107,16 +107,24 @@ def _pick_subnet(project: str, region: str, vpc_id: str) -> str | None:
     return None
 
 
-def _launch_probe(
+def _submit_probe_insert(
     project: str,
     region: str,
     vpc_id: str,
     instance_name: str,
-) -> tuple[compute_v1.Instance, str]:
-    """Create an ephemeral non-NVLink probe VM in ``vpc_id``.
+) -> tuple[str, str]:
+    """Submit an async ``instances.insert`` for the non-NVLink probe VM.
 
-    Returns (instance, zone). Uses e2-small (no accelerators) so the
-    validator sees a real non-NVLink shape without requiring GPU quota.
+    Returns ``(zone, op_name)``. The probe-VM cleanup tracker is stamped
+    by the caller **immediately after this call returns**, BEFORE waiting
+    on the op. Mirrors the async-create discipline (Pattern (a) — stamp
+    before wait): if the operation succeeds but ``wait_for_zonal_op``
+    later raises (timeout, DONE-with-error), the tracker already names the
+    accepted VM so the ``finally`` cleanup path deletes it.
+
+    The probe is intentionally e2-small with no accelerators so the
+    released validator sees a real non-NVLink shape without requiring
+    GPU quota.
     """
     subnet = _pick_subnet(project, region, vpc_id)
     if subnet is None:
@@ -149,8 +157,7 @@ def _launch_probe(
         service_accounts=[],
     )
     op = instances_c.insert(project=project, zone=zone, instance_resource=probe)
-    wait_for_zonal_op(project, zone, op.name, timeout=120)
-    return instances_c.get(project=project, zone=zone, instance=instance_name), zone
+    return zone, op.name
 
 
 @handle_gcp_errors
@@ -205,10 +212,20 @@ def main() -> int:
             # Either no --node-id was supplied or the named node does not
             # exist. Launch our own non-NVLink probe so the released
             # validator gets a real guest_accelerators readback.
-            instance, probe_zone = _launch_probe(project, args.region, args.vpc_id, probe_name)
+            #
+            # Async-create discipline (Pattern (a)): submit the insert,
+            # then stamp the cleanup tracker BEFORE waiting on the op.
+            # If wait_for_zonal_op times out or returns DONE-with-error,
+            # the `finally` path still names the accepted VM and deletes
+            # it, so a half-created probe cannot leak.
+            probe_zone, op_name = _submit_probe_insert(
+                project, args.region, args.vpc_id, probe_name
+            )
             probe_created = True
             result["node_id"] = probe_name
             chosen_node_id = probe_name
+            wait_for_zonal_op(project, probe_zone, op_name, timeout=120)
+            instance = instances_c.get(project=project, zone=probe_zone, instance=probe_name)
 
         result["tests"]["node_resolved"] = {
             "passed": True,
