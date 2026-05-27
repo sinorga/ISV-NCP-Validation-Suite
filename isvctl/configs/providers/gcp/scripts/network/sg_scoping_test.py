@@ -585,29 +585,9 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
         if policy_resp.status_code != 200:
             raise RuntimeError(f"IAM setIamPolicy failed ({policy_resp.status_code}): {policy_resp.text}")
 
-        # 3. IAM propagation poll — burn up to 180s to let actAs take effect
-        # before the first instances.insert that attaches the SA. The
-        # InvalidArgument path here is "Service account ... does not exist"
-        # or "actAs ... denied" both of which we retry through.
-        propagation_ok = False
-        propagation_deadline = time.monotonic() + 180
-        last_err = None
-        while time.monotonic() < propagation_deadline:
-            try:
-                # Use a cheap call against the IAM REST endpoint to verify
-                # the SA is visible — it's the same data path actAs reads.
-                check_url = f"https://iam.googleapis.com/v1/projects/-/serviceAccounts/{sa_email}"
-                rg = session.get(check_url, timeout=15)
-                if rg.status_code == 200:
-                    propagation_ok = True
-                    break
-            except Exception as ex:
-                last_err = ex
-            time.sleep(15)
-        if not propagation_ok:
-            raise RuntimeError(f"IAM propagation poll timed out: {last_err}")
-
-        # Network + subnet for VM placement.
+        # Network + subnet for VM placement — created BEFORE the actAs
+        # propagation probe so the SA-attached `instances.insert` retry
+        # can run against a real target subnet.
         op = networks_c.insert(
             project=project,
             network_resource=compute_v1.Network(
@@ -683,13 +663,61 @@ def _scope_service(project: str, region: str) -> dict[str, Any]:
                 service_accounts=sas,
             )
 
-        op = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_allowed, sa_email))
-        cleanup.append(("instance", name_allowed))
-        wait_for_zonal_op(project, zone, op.name, timeout=600)
+        # actAs-effective propagation probe. A bare SA GET (200) returns
+        # well BEFORE roles/iam.serviceAccountUser is actually usable to
+        # attach the SA to a VM. The only honest probe is the attach
+        # itself — wrap the SA-attached VM insert in a retry loop bounded
+        # by the documented IAM propagation budget (~180s). Both the
+        # synchronous InvalidArgument / PermissionDenied (SA-not-yet-exists
+        # / actAs denied) and the async RuntimeError raised by
+        # wait_for_zonal_op when the Operation DONE-with-error carries the
+        # same IAM tokens count as "not yet propagated" — retry through
+        # both. Anything else escalates to the outer except.
+        propagation_deadline = time.monotonic() + 180
+        last_err: Exception | None = None
+        propagation_ok = False
+        while time.monotonic() < propagation_deadline:
+            try:
+                op = instances_c.insert(
+                    project=project,
+                    zone=zone,
+                    instance_resource=_build(name_allowed, sa_email),
+                )
+                cleanup.append(("instance", name_allowed))
+                wait_for_zonal_op(project, zone, op.name, timeout=120)
+                propagation_ok = True
+                break
+            except (gax.InvalidArgument, gax.PermissionDenied) as ex:
+                last_err = ex
+                time.sleep(15)
+            except RuntimeError as ex:
+                msg = str(ex)
+                # Async-failure tokens for actAs / SA propagation. Anything
+                # else (e.g., quota, stockout, unrelated op error) re-raises.
+                if (
+                    "service account" in msg.lower()
+                    or "actas" in msg.lower()
+                    or "iam.serviceaccounts" in msg.lower()
+                    or "does not exist" in msg.lower()
+                ):
+                    last_err = ex
+                    # The failed Operation may have already created a stub
+                    # instance record we tracked; do not double-track.
+                    cleanup[:] = [c for c in cleanup if c != ("instance", name_allowed)]
+                    time.sleep(15)
+                else:
+                    raise
+        if not propagation_ok:
+            raise RuntimeError(
+                f"actAs propagation poll timed out on instances.insert: {last_err}"
+            )
 
+        # SA-attached insert has succeeded — actAs is now effective. The
+        # second VM (no SA) does not exercise actAs and can be inserted
+        # directly.
         op = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_other, None))
         cleanup.append(("instance", name_other))
-        wait_for_zonal_op(project, zone, op.name, timeout=600)
+        wait_for_zonal_op(project, zone, op.name, timeout=120)
 
         # Independent readbacks per VM PLUS firewall readback. The
         # service-scope contract requires BOTH:
