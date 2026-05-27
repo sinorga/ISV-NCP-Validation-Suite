@@ -58,7 +58,10 @@ def _create_pair(
         ),
     )
     cleanup.append(("network", net_name))
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap fits the 240s step timeout (network.yaml byoip_test). Two pairs
+    # are created sequentially in main, so each insert+wait must complete
+    # well under half the step cap.
+    wait_for_global_op(project, op.name, timeout=90)
     op = compute_v1.SubnetworksClient().insert(
         project=project,
         region=region,
@@ -71,7 +74,7 @@ def _create_pair(
         ),
     )
     cleanup.append(("subnet", sub_name))
-    wait_for_region_op(project, region, op.name, timeout=300)
+    wait_for_region_op(project, region, op.name, timeout=90)
     return net_name, sub_name
 
 
@@ -93,6 +96,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup: list[tuple[str, str]] = []
+    cleanup_errors: list[str] = []
     try:
         net_c, sub_c = _create_pair(project, args.region, "byo-c", custom_sub_cidr, cleanup=cleanup)
         result["tests"]["custom_cidr_create"] = {
@@ -138,7 +142,7 @@ def main() -> int:
     finally:
         for kind, n in reversed(cleanup):
             if kind == "subnet":
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda nn=n: wait_for_region_op(
                         project,
                         args.region,
@@ -148,7 +152,7 @@ def main() -> int:
                     resource_desc=f"subnet {n}",
                 )
             else:
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda nn=n: wait_for_global_op(
                         project,
                         networks_c.delete(project=project, network=nn).name,
@@ -156,6 +160,10 @@ def main() -> int:
                     ),
                     resource_desc=f"network {n}",
                 )
+            if not ok:
+                cleanup_errors.append(f"{kind} {n}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

@@ -71,10 +71,12 @@ def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) 
             except gax.NotFound:
                 pass
         del_op = networks.delete(project=project, network=name)
-        wait_for_global_op(project, del_op.name, timeout=300)
+        # Cap fits the 240s step timeout (network.yaml sg_crud).
+        wait_for_global_op(project, del_op.name, timeout=120)
         op = networks.insert(project=project, network_resource=_build())
     cleanup.append(("network", name))
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap fits the 240s step timeout (network.yaml sg_crud).
+    wait_for_global_op(project, op.name, timeout=180)
 
 
 def _insert_firewall(
@@ -136,6 +138,7 @@ def main() -> int:
 
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup_targets: list[tuple[str, str]] = []  # (kind, name)
+    cleanup_errors: list[str] = []
 
     try:
         _insert_network(project, network_name, cleanup=cleanup_targets)
@@ -233,7 +236,7 @@ def main() -> int:
     finally:
         for kind, name in reversed(cleanup_targets):
             if kind == "firewall":
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda n=name: wait_for_global_op(
                         project,
                         firewalls.delete(project=project, firewall=n).name,
@@ -242,7 +245,7 @@ def main() -> int:
                     resource_desc=f"firewall {name}",
                 )
             else:
-                delete_with_retry(
+                ok = delete_with_retry(
                     lambda n=name: wait_for_global_op(
                         project,
                         networks.delete(project=project, network=n).name,
@@ -250,6 +253,10 @@ def main() -> int:
                     ),
                     resource_desc=f"network {name}",
                 )
+            if not ok:
+                cleanup_errors.append(f"{kind} {name}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result["success"] and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

@@ -62,6 +62,7 @@ def main() -> int:
     result: dict[str, Any] = {"success": False, "platform": "network", "tests": {}}
     cleanup_zone = False
     network_created = False
+    cleanup_errors: list[str] = []
     try:
         op = networks_c.insert(
             project=project,
@@ -72,7 +73,8 @@ def main() -> int:
             ),
         )
         network_created = True
-        wait_for_global_op(project, op.name, timeout=300)
+        # Cap fits the 240s step timeout (network.yaml dns_test).
+        wait_for_global_op(project, op.name, timeout=180)
         result["tests"]["create_vpc_with_dns"] = {"passed": True, "vpc_id": network}
 
         # Cloud DNS — bypass the silently-dropped set-property pattern.
@@ -181,10 +183,10 @@ def main() -> int:
                 if list(ch.deletions):
                     ch.create()
                 z.delete()
-            except Exception:
-                pass
+            except Exception as e:
+                cleanup_errors.append(f"dns zone {zone_name}: {e}")
         if network_created:
-            delete_with_retry(
+            ok = delete_with_retry(
                 lambda: wait_for_global_op(
                     project,
                     networks_c.delete(project=project, network=network).name,
@@ -192,6 +194,10 @@ def main() -> int:
                 ),
                 resource_desc=f"network {network}",
             )
+            if not ok:
+                cleanup_errors.append(f"network {network}: delete_with_retry returned False")
+    result["tests"]["cleanup"] = {"passed": not cleanup_errors, "errors": cleanup_errors}
+    result["success"] = result.get("success", False) and not cleanup_errors
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1

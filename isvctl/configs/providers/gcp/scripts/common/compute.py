@@ -28,7 +28,6 @@ the AWS oracle:
 
 from __future__ import annotations
 
-import hashlib
 import os
 import re
 import subprocess
@@ -93,37 +92,58 @@ def resolve_project(arg_value: str | None = None) -> str:
 def unique_suffix(base: str, *, length: int = 8) -> str:
     """Append the suite's ``RUN_ID`` (or a fresh UUID8) to ``base``.
 
-    Compute Engine resource names ARE the API IDs (name-collision
-    risk). Every user-supplied name in this provider — instance,
-    firewall, local
-    key file — MUST flow through this helper so that:
+    Canonical shape: ``<base>-<RUN_ID[:length]>``. This is the same
+    contract the existing-patterns common rule mandates so operators
+    can group artifacts by RUN_ID (``gcloud compute instances list
+    --filter "name~$RUN_ID"``) and orphan sweepers can scope by suffix.
 
-      * Concurrent test runs (different ``RUN_ID``s) don't collide
-        on ``AlreadyExists`` during create.
-      * Operators can group artifacts by run id (``gcloud compute
-        instances list --filter "name~$RUN_ID"``).
-      * Same-session teardown deletes only its own resources.
-
-    Also mixes in a short hash of ``os.getcwd()`` so concurrent
-    invocations from different shell sessions (different cwd) under the
-    SAME ``RUN_ID`` don't collide on shared bases like ``isv-crud`` —
-    ``RUN_ID[:8]`` alone is identical across parallel runs, so without
-    the cwd-derived component every test-stub-managed resource
-    (vpc_crud, subnet_test, isolation_test, …) hits ``AlreadyExists``
-    on the second concurrent run. Only the ``--name`` args declared in
-    the YAML config get distinct values at the orchestrator level;
-    names minted inside test stubs need this helper to stay unique.
-
-    Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g.
-    manual stub invocation without the harness setting the env var).
-    The helper MUST NOT raise on missing env var — that would block
+    Falls back to a random UUID8 only when ``RUN_ID`` is unset (manual
+    stub invocation without the harness setting the env var). The
+    helper MUST NOT raise on missing env var — that would block
     ad-hoc reproduction.
+
+    For TIGHT namespaces where multiple parallel attempts can race
+    inside the same RUN_ID (e.g., service accounts capped at 30 chars,
+    or short-lived peer networks recreated within one stub), use
+    ``unique_tight_id`` instead — it interleaves a random discriminator
+    with the run-id fragment so retries don't collide while still
+    preserving traceability.
     """
     sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
     if sid:
-        worker_tag = hashlib.sha1(os.getcwd().encode()).hexdigest()[:4]
-        return f"{base}-{sid[:length]}-{worker_tag}"
+        return f"{base}-{sid[:length]}"
     return f"{base}-{uuid.uuid4().hex[:length]}"
+
+
+def unique_tight_id(prefix: str, *, max_len: int, runid_len: int = 4, disc_len: int = 4) -> str:
+    """Compose a unique ID for a tight namespace (e.g., 30-char SA IDs).
+
+    Shape: ``<prefix>-<random-disc>-<runid-fragment>``. The random
+    discriminator keeps same-RUN_ID retries from colliding (GCP SAs are
+    soft-deleted and the name is reserved for ~30 days after delete);
+    the run-id fragment preserves the operator-facing trace from the
+    suffix to the live run.
+
+    ``max_len`` is the hard cap (GCP service-account local part: 30).
+    The result is truncated only if the composed form exceeds it — both
+    discriminator and run-id fragment retain their full length when
+    headroom exists.
+    """
+    sid = (os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or "").strip()
+    if not sid:
+        sid = uuid.uuid4().hex
+    disc = uuid.uuid4().hex[:disc_len]
+    runid_frag = sid[:runid_len]
+    composed = f"{prefix}-{disc}-{runid_frag}"
+    if len(composed) <= max_len:
+        return composed
+    # Headroom: subtract prefix + 2 hyphens + the runid fragment, keep
+    # the random disc as long as still positive. Caller is expected to
+    # have picked a sensible prefix for the cap.
+    headroom = max_len - len(prefix) - 2 - len(runid_frag)
+    if headroom < 1:
+        return composed[:max_len]
+    return f"{prefix}-{disc[:headroom]}-{runid_frag}"
 
 
 # --------------------------------------------------------------------- #
