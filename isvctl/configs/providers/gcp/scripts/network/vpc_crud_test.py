@@ -22,14 +22,13 @@ import json
 import os
 import sys
 import time
-import uuid
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import resolve_project, unique_suffix, unique_tight_id, wait_for_global_op
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -205,16 +204,15 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
     """
     result: dict[str, Any] = {"passed": False, "mutation": "temporary_peering_add_remove"}
     networks = compute_v1.NetworksClient()
-    # Per-attempt random suffix instead of RUN_ID derived — an orphan peer
-    # from a sandbox-terminated prior run keeps stale peerings that block
-    # both peer-delete (`is not ready`) and main-create
-    # (`OPERATION_CANCELED_BY_USER`). A fresh peer name sidesteps the
-    # orphan entirely; the peer is short-lived and not subject to
-    # verified-reuse so randomness is safe.
-    attempt = uuid.uuid4().hex[:6]
-    peer_name = f"{name}-peer-{attempt}"
+    # `<prefix>-<disc>-<RUN_ID>` shape: the random discriminator sidesteps
+    # orphan peers from sandbox-terminated prior runs (stale peerings
+    # block both peer-delete `is not ready` and main-create
+    # `OPERATION_CANCELED_BY_USER`), while the RUN_ID suffix keeps the
+    # final cloud resource ID and peering name discoverable by run-scoped
+    # cleanup (`gcloud compute networks list --filter "name~$RUN_ID"`).
+    peer_name = unique_tight_id("isv-crud-peer", max_len=63)
     peer_tracker: dict[str, bool] = {"created": False}
-    peering_name = f"crud-peer-{attempt}"
+    peering_name = unique_tight_id("crud-peer", max_len=63)
     peering_observed = False
     cleanup_errors: list[str] = []
     # Tracker for peerings added to the MAIN VPC (name). Stamped immediately
@@ -251,18 +249,20 @@ def test_update_tags(project: str, name: str) -> dict[str, Any]:
             result["message"] = "peering observed on network — mutability proof"
         else:
             result["error"] = "peering not visible after add_peering"
-        # Remove the peering immediately (we're testing mutability, not the peer)
+        # Remove the peering immediately (we're testing mutability, not the peer).
+        # Untrack ONLY after wait_for_global_op reaches DONE — if the wait
+        # raises or times out, the peering may still be present on the main
+        # VPC, and `finally` must retry remove_peering. Untracking
+        # before-wait (the prior shape) lost the tracker entry on wait
+        # failure and leaked the peering, blocking peer-network and
+        # main-network delete downstream.
         op = networks.remove_peering(
             project=project,
             network=name,
             networks_remove_peering_request_resource=compute_v1.NetworksRemovePeeringRequest(name=peering_name),
         )
-        # Untrack on successful inline removal dispatch so finally does not
-        # double-remove (the wait below may still fail, but remove_peering
-        # is idempotent w.r.t. an already-removed peering — finally catches
-        # any leftover via the membership check on the live network read).
-        peerings_on_main.remove(peering_name)
         wait_for_global_op(project, op.name, timeout=180)
+        peerings_on_main.remove(peering_name)
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
         result["error_type"], result["error"] = classify_gcp_error(e)
         cleanup_errors.append(f"peering add/remove: {e}")
