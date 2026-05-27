@@ -104,15 +104,15 @@ def unique_suffix(base: str, *, length: int = 8) -> str:
         instances list --filter "name~$RUN_ID"``).
       * Same-session teardown deletes only its own resources.
 
-    Also mixes in a short hash of ``os.getcwd()`` so concurrent factory
-    workers running live mode in *different worktrees* under the SAME
-    ``RUN_ID`` don't collide on shared bases like ``isv-crud`` —
-    ``RUN_ID[:8]`` alone is identical across sibling step worktrees,
-    so without the cwd-derived component every test-stub-managed
-    resource (vpc_crud, subnet_test, isolation_test, …) hits
-    ``AlreadyExists`` on the second concurrent run. The runner only
-    discriminates ``--name`` args in the YAML config, not the names
-    each test stub mints internally.
+    Also mixes in a short hash of ``os.getcwd()`` so concurrent
+    invocations from different shell sessions (different cwd) under the
+    SAME ``RUN_ID`` don't collide on shared bases like ``isv-crud`` —
+    ``RUN_ID[:8]`` alone is identical across parallel runs, so without
+    the cwd-derived component every test-stub-managed resource
+    (vpc_crud, subnet_test, isolation_test, …) hits ``AlreadyExists``
+    on the second concurrent run. Only the ``--name`` args declared in
+    the YAML config get distinct values at the orchestrator level;
+    names minted inside test stubs need this helper to stay unique.
 
     Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g.
     manual stub invocation without the harness setting the env var).
@@ -234,8 +234,7 @@ def _list_region_zones(
         except _REGION_LOOKUP_RETRY_TRANSIENT as e:
             last_transient = e
             print(
-                f"  region zones lookup transient ({type(e).__name__}); "
-                f"attempt {attempt}/{attempts}",
+                f"  region zones lookup transient ({type(e).__name__}); attempt {attempt}/{attempts}",
                 file=sys.stderr,
             )
             time.sleep(backoff * attempt)
@@ -255,8 +254,7 @@ def _list_region_zones(
             raise RuntimeError(msg) from e
     if last_transient is not None:
         print(
-            f"  region zones lookup exhausted after {attempts} attempts: "
-            f"{last_transient}",
+            f"  region zones lookup exhausted after {attempts} attempts: {last_transient}",
             file=sys.stderr,
         )
     return []
@@ -307,11 +305,7 @@ def select_zones(
     # work in offline environments.
     if not region_zones:
         preferred_in_region = [z for z in PREFERRED_ZONES if z.startswith(f"{region_or_zone}-")]
-    cross_region = [
-        z
-        for z in PREFERRED_ZONES
-        if z not in preferred_in_region and z not in other_in_region
-    ]
+    cross_region = [z for z in PREFERRED_ZONES if z not in preferred_in_region and z not in other_in_region]
     # Zone-capacity contract: intersect with PREFERRED_ZONES when
     # non-empty; only fall back to nonpreferred live zones when the
     # intersection is empty (region missing from the curated capacity
@@ -569,7 +563,11 @@ def wait_for_global_op(project: str, operation_name: str, *, timeout: int = 600)
 
 
 def wait_for_region_op(
-    project: str, region: str, operation_name: str, *, timeout: int = 600,
+    project: str,
+    region: str,
+    operation_name: str,
+    *,
+    timeout: int = 600,
 ) -> compute_v1.Operation:
     """Block until a regional Compute Operation reaches DONE.
 
@@ -585,9 +583,7 @@ def wait_for_region_op(
         op = client.get(project=project, region=region, operation=operation_name)
         if op.status == compute_v1.Operation.Status.DONE:
             if op.error and op.error.errors:
-                msg = "; ".join(
-                    f"{getattr(e, 'code', '')}:{getattr(e, 'message', str(e))}" for e in op.error.errors
-                )
+                msg = "; ".join(f"{getattr(e, 'code', '')}:{getattr(e, 'message', str(e))}" for e in op.error.errors)
                 raise RuntimeError(f"Region op {operation_name} failed: {msg}")
             return op
         if time.monotonic() >= deadline:

@@ -56,7 +56,10 @@ def _insert_network(project: str, name: str, *, cleanup: list[tuple[str, str]]) 
         ),
     )
     cleanup.append(("network", name))
-    wait_for_global_op(project, op.name, timeout=300)
+    # Cap each network-insert wait at 120s to fit the step's 240s envelope —
+    # two sequential network creates plus the peering ops must complete
+    # within cap. Matches AWS oracle's 120s same-step timeout ceiling.
+    wait_for_global_op(project, op.name, timeout=120)
 
 
 def _insert_subnet(

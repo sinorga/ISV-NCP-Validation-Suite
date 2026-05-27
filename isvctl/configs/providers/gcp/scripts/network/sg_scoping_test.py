@@ -202,13 +202,18 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
                 service_accounts=[],
             )
 
-        op = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_tagged, [tag]))
+        # Two sequential VM creates; each wait_for_zonal_op timeout must fit
+        # the workload/node step cap of 240s. Operator can observe SIGKILL
+        # at the orchestrator cap if both inserts approach 240s combined.
+        op_tagged = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_tagged, [tag]))
         cleanup.append(("instance", name_tagged))
-        wait_for_zonal_op(project, zone, op.name, timeout=300)
-
-        op = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_other, []))
+        op_other = instances_c.insert(project=project, zone=zone, instance_resource=_build(name_other, []))
         cleanup.append(("instance", name_other))
-        wait_for_zonal_op(project, zone, op.name, timeout=300)
+        # Issue both inserts back-to-back, then wait for both operations
+        # concurrently — shaves the second VM's serialized wait off the
+        # critical path (AWS oracle parity: ec2 RunInstances batches similarly).
+        wait_for_zonal_op(project, zone, op_tagged.name, timeout=120)
+        wait_for_zonal_op(project, zone, op_other.name, timeout=120)
 
         # Independent readbacks per VM. The "allowed" boolean comes from the
         # tagged VM's own .tags.items containing the firewall's targetTag;
