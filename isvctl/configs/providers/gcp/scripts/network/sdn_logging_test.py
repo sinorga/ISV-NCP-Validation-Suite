@@ -411,7 +411,17 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
         # vendor API-version prefix change (v1.compute.* or compute.*) does
         # not silently zero-out the seen counters.
         deadline = time.monotonic() + 480
-        seen: dict[str, int] = {"insert": 0, "patch": 0, "delete": 0}
+        # Logical event keys, not raw API method suffixes: a firewall
+        # modification audit entry is recorded as `compute.firewalls.patch`
+        # OR `compute.firewalls.update` depending on the SDK call path /
+        # log version, and both satisfy the modify-rule oracle.
+        seen: dict[str, int] = {"insert": 0, "modify": 0, "delete": 0}
+        method_to_event = {
+            "insert": "insert",
+            "patch": "modify",
+            "update": "modify",
+            "delete": "delete",
+        }
         reachable = False
         first_insert_entry = None
         audit_log_id_encoded = AUDIT_LOG_NAME.replace("/", "%2F")
@@ -437,11 +447,12 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
                     continue
                 # Match both `compute.firewalls.<op>` and
                 # `v1.compute.firewalls.<op>` to tolerate vendor API-version
-                # prefix differences across regions/log versions.
-                for op_name in ("insert", "patch", "delete"):
-                    if method_name.endswith(f"compute.firewalls.{op_name}"):
-                        seen[op_name] += 1
-                        if op_name == "insert" and first_insert_entry is None:
+                # prefix differences across regions/log versions. Both
+                # `patch` and `update` map to the logical `modify` event.
+                for method_suffix, event_key in method_to_event.items():
+                    if method_name.endswith(f"compute.firewalls.{method_suffix}"):
+                        seen[event_key] += 1
+                        if method_suffix == "insert" and first_insert_entry is None:
                             first_insert_entry = entry
             if all(seen.values()):
                 break
@@ -449,8 +460,8 @@ def _audit_trail(project: str, network: str) -> dict[str, Any]:
 
         result["tests"]["audit_endpoint_reachable"] = {"passed": reachable}
         result["tests"]["create_rule_logged"] = {"passed": bool(seen["insert"])}
-        # patch OR update — both Compute Engine method names valid.
-        result["tests"]["modify_rule_logged"] = {"passed": bool(seen["patch"])}
+        # modify counter accepts compute.firewalls.patch OR .update.
+        result["tests"]["modify_rule_logged"] = {"passed": bool(seen["modify"])}
         result["tests"]["delete_rule_logged"] = {"passed": bool(seen["delete"])}
         # Audit-event field validation: inspect the captured insert entry;
         # require principalEmail + timestamp + resourceName all present per
