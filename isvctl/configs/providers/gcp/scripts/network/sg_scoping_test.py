@@ -176,8 +176,44 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         )
         cleanup.append(("firewall", fw))
         wait_for_global_op(project, op.name, timeout=180)
-        result["tests"]["create_sg"] = {"passed": True, "sg_id": fw}
-        result["tests"][apply_key] = {"passed": True, "tag": tag}
+        # Firewall readback — `apply_*_rule`, `allowed`, and `blocked`
+        # booleans MUST gate on the firewall's actual shape (target tag,
+        # network, INGRESS direction, tcp/22), not solely on VM tag
+        # membership. Without this readback, a workload/node-scope test
+        # could pass when the firewall was created without the expected
+        # target_tag (e.g., API silently dropping the field) or against
+        # the wrong network — VM tags alone do not prove the firewall is
+        # actually scoped. AWS oracle parity: SgScopingCheck verifies
+        # the SG's GroupId + IpPermissions shape AND the ENI attachment.
+        fw_obj = firewalls.get(project=project, firewall=fw)
+        fw_target_tags = list(fw_obj.target_tags or ())
+        fw_network = (fw_obj.network or "").rsplit("/", 1)[-1]
+        fw_direction = fw_obj.direction or ""
+        fw_allowed_entries = [
+            (a.I_p_protocol or "", list(a.ports or ()))
+            for a in (fw_obj.allowed or ())
+        ]
+        firewall_scoped = (
+            fw_target_tags == [tag]
+            and fw_network == network
+            and fw_direction == "INGRESS"
+            and ("tcp", ["22"]) in fw_allowed_entries
+        )
+        result["tests"]["create_sg"] = {
+            "passed": True,
+            "sg_id": fw,
+            "firewall_target_tags": fw_target_tags,
+            "firewall_network": fw_network,
+            "firewall_direction": fw_direction,
+            "firewall_allowed": fw_allowed_entries,
+        }
+        # apply_*_rule gates on the firewall actually carrying the expected
+        # shape (not just that an insert was issued).
+        result["tests"][apply_key] = {
+            "passed": firewall_scoped,
+            "tag": tag,
+            "firewall_target_tags": fw_target_tags,
+        }
 
         # Two VMs — one tagged, one untagged. Use small disk + e2-small.
         def _build(name: str, tags: list[str]) -> compute_v1.Instance:
@@ -218,23 +254,35 @@ def _scope_workload(project: str, region: str, scope: str) -> dict[str, Any]:
         wait_for_zonal_op(project, zone, op_tagged.name, timeout=120)
         wait_for_zonal_op(project, zone, op_other.name, timeout=120)
 
-        # Independent readbacks per VM. The "allowed" boolean comes from the
-        # tagged VM's own .tags.items containing the firewall's targetTag;
-        # the "blocked" boolean comes from the untagged VM's .tags.items
-        # NOT containing it. Two observations, two real instances.
+        # Independent readbacks per VM AND the firewall. The "allowed"
+        # boolean requires BOTH (a) the firewall actually scopes to the
+        # expected tag/network/protocol/ports — proven by the readback
+        # above — AND (b) the tagged VM's .tags.items contains that
+        # targetTag. The "blocked" boolean is symmetric: firewall_scoped
+        # AND the untagged VM's tag list does NOT contain it.
+        # AWS oracle parity: SgScopingCheck verifies the SG attachment
+        # AND the SG's own IpPermissions; either alone is fake-signal.
         tagged_obj = instances_c.get(project=project, zone=zone, instance=name_tagged)
         other_obj = instances_c.get(project=project, zone=zone, instance=name_other)
         tagged_tags = set(tagged_obj.tags.items or ()) if tagged_obj.tags else set()
         other_tags = set(other_obj.tags.items or ()) if other_obj.tags else set()
         result["tests"][allowed_key] = {
-            "passed": tag in tagged_tags,
-            "message": f"tagged VM {name_tagged} carries firewall targetTag {tag}",
+            "passed": firewall_scoped and tag in tagged_tags,
+            "message": (
+                f"firewall {fw} scoped (tag={tag}, network={network}, INGRESS tcp/22) "
+                f"AND tagged VM {name_tagged} carries the targetTag"
+            ),
             "observed_tags": sorted(tagged_tags),
+            "firewall_scoped": firewall_scoped,
         }
         result["tests"][blocked_key] = {
-            "passed": tag not in other_tags,
-            "message": f"untagged VM {name_other} does not carry firewall targetTag {tag}",
+            "passed": firewall_scoped and tag not in other_tags,
+            "message": (
+                f"firewall {fw} scoped to tag {tag} AND untagged VM "
+                f"{name_other} does NOT carry the targetTag"
+            ),
             "observed_tags": sorted(other_tags),
+            "firewall_scoped": firewall_scoped,
         }
         # Recompute INSIDE try — if try raises before any test was written,
         # success stays False (default). Only the cleanup gate is AND-ed in

@@ -27,7 +27,13 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from datetime import UTC
 
-from common.compute import resolve_project, unique_suffix, wait_for_global_op
+from common.compute import (
+    narrow_region_to_zone,
+    resolve_project,
+    unique_suffix,
+    wait_for_global_op,
+    wait_for_zonal_op,
+)
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
@@ -118,22 +124,41 @@ def _hardware_faults(project: str, network: str) -> dict[str, Any]:
     return result
 
 
-def _latency_perf(project: str, network: str) -> dict[str, Any]:
+def _list_vpc_subnets(project: str, region: str, network: str) -> list[compute_v1.Subnetwork]:
+    """Return subnetworks in ``region`` whose ``network`` URL ends with
+    ``/networks/{network}``."""
+    client = compute_v1.SubnetworksClient()
+    network_suffix = f"/networks/{network}"
+    return [
+        s
+        for s in client.list(project=project, region=region)
+        if (s.network or "").endswith(network_suffix)
+    ]
+
+
+def _latency_perf(project: str, region: str, network: str) -> dict[str, Any]:
     """Each subtest issues a distinct probe — flow-log endpoint, named
     performance namespace, packet-metric filter, recency window — so the
     pass signal does not collapse to a single API call (AWS oracle parity).
 
-    Every metric/recency probe MUST be scoped to the target VPC. VPC Flow
-    Logs in Cloud Logging entries carry the originating network in
-    `jsonPayload.src_vpc.vpc_name` and `jsonPayload.dest_vpc.vpc_name`;
-    filtering on either-or scopes the query to traffic that traversed
-    THIS network. Without the scope, an unrelated VPC's flow logs can
-    satisfy the validator and the test passes on evidence from a network
-    the suite did not create — Rule #9 fake-signal. AWS oracle parity:
-    aws/scripts/network/sdn_logging_test.py scopes flow logs to the
-    requested vpc-id via the `resource-id` filter.
+    The flow-log telemetry source must be REAL and SCOPED:
+
+      * Subnetworks created by create_vpc.py carry log_config.enable=True
+        (verified-reuse — we read it back here, never fabricated).
+      * A bounded-traffic probe VM is launched on a target subnet to
+        generate egress packets so Cloud Logging has observable flow-log
+        entries within this run's sample window. Without the probe, a
+        clean GCP project with flow logs enabled but no VM workload
+        produces zero `vpc_flows` entries and `samples_recent` fails.
+      * Every Cloud Logging query is scoped to the target VPC via
+        `jsonPayload.{src_vpc,dest_vpc}.vpc_name="{network}"` — an
+        unscoped query would let an unrelated VPC's flow logs satisfy the
+        validator (AWS oracle parity: `resource-id` filter on the AWS
+        side scopes the equivalent query).
     """
-    sample_window = 300
+    from datetime import datetime
+
+    sample_window = 600
     flow_log_root = f'logName="projects/{project}/logs/compute.googleapis.com%2Fvpc_flows"'
     # Target-VPC scope on jsonPayload network names. Either side of a
     # connection (src or dest) attributed to our network suffices.
@@ -150,53 +175,149 @@ def _latency_perf(project: str, network: str) -> dict[str, Any]:
         "probe_resource_id": network,
         "tests": {},
     }
-    try:
-        # 1. Metrics endpoint reachable: VPC Flow Logs API reachable for
-        # entries attributed to this network. Endpoint reachability is the
-        # only subtest that may legitimately pass on an empty result set —
-        # the others gate on observed samples bound to THIS network.
-        endpoint_ok, _ = _list_log_entries(flow_log_base, max_results=1)
-        result["tests"]["metrics_endpoint_reachable"] = {"passed": endpoint_ok}
 
-        # 2. Performance metric present: narrow to target-VPC entries
-        # carrying the bytes_sent fields the perf namespace uses.
-        # Empty result MUST NOT read as present (AWS oracle parity:
-        # SdnLatencyPerfLoggingCheck requires nonzero samples).
-        perf_filter = flow_log_base + " AND jsonPayload.bytes_sent:*"
-        perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
+    instances_c = compute_v1.InstancesClient()
+    probe_vm_name = unique_suffix("isv-flow-prb")
+    zone = narrow_region_to_zone(region)
+    probe_created = False
+    flow_logs_enabled = False
+    probe_subnet: compute_v1.Subnetwork | None = None
+    test_start = datetime.now(UTC)
+
+    try:
+        # ---- Detect flow-log configuration on target-VPC subnets ----
+        subnets = _list_vpc_subnets(project, region, network)
+        if not subnets:
+            raise RuntimeError(
+                f"no subnetworks found for VPC {network!r} in region {region}; "
+                "create_network must precede this step"
+            )
+        for sub in subnets:
+            if getattr(sub.log_config, "enable", False):
+                flow_logs_enabled = True
+                probe_subnet = sub
+                break
+        if not flow_logs_enabled:
+            raise RuntimeError(
+                f"VPC {network!r} has subnetworks without log_config.enable=True; "
+                "create_vpc.py must set SubnetworkLogConfig(enable=True) at subnet create"
+            )
+
+        # ---- Bounded-traffic probe ----
+        # Startup script pings 8.8.8.8 for ~10s to generate VPC egress
+        # captured by flow logs. External IP attached because flow logs
+        # of egress to the internet record src_vpc=our_network.
+        startup_script = (
+            "#!/bin/bash\n"
+            "set -e\n"
+            "# Bounded outbound ICMP — generates flow-log entries scoped\n"
+            "# to this VPC (src_vpc=our_network on egress).\n"
+            "ping -c 10 -i 1 8.8.8.8 || true\n"
+        )
+        probe = compute_v1.Instance(
+            name=probe_vm_name,
+            description=ISV_DESCRIPTION,
+            machine_type=f"zones/{zone}/machineTypes/e2-small",
+            disks=[
+                compute_v1.AttachedDisk(
+                    boot=True,
+                    auto_delete=True,
+                    initialize_params=compute_v1.AttachedDiskInitializeParams(
+                        source_image="projects/debian-cloud/global/images/family/debian-12",
+                        disk_size_gb=10,
+                    ),
+                )
+            ],
+            network_interfaces=[
+                compute_v1.NetworkInterface(
+                    network=f"projects/{project}/global/networks/{network}",
+                    subnetwork=f"projects/{project}/regions/{region}/subnetworks/{probe_subnet.name}",
+                    access_configs=[
+                        compute_v1.AccessConfig(name="External NAT", type_="ONE_TO_ONE_NAT"),
+                    ],
+                )
+            ],
+            metadata=compute_v1.Metadata(
+                items=[compute_v1.Items(key="startup-script", value=startup_script)],
+            ),
+            service_accounts=[],
+        )
+        op = instances_c.insert(project=project, zone=zone, instance_resource=probe)
+        probe_created = True
+        wait_for_zonal_op(project, zone, op.name, timeout=180)
+
+        # Boot + startup-script execution + traffic flow. The image pulls
+        # cloud-init and runs the script ~15-30s post-RUNNING; pings then
+        # take 10s; flow-log buffering adds 5-10s. 60s is comfortably enough.
+        time.sleep(60)
+
+        # ---- Poll Cloud Logging for scoped flow-log samples ----
+        # Restrict the recency window to entries observed AFTER this step
+        # started so a stale unrelated run cannot satisfy the validator.
+        since_ts = test_start.isoformat()
+        # 1. Metrics endpoint reachable: VPC Flow Logs API reachable for
+        # entries attributed to this network.
+        endpoint_filter = flow_log_base + f' AND timestamp>="{since_ts}"'
+        # 2. Performance metric present: bytes_sent populated.
+        perf_filter = endpoint_filter + " AND jsonPayload.bytes_sent:*"
+        # 3. Packet metric present: packets_sent populated.
+        packet_filter = endpoint_filter + " AND jsonPayload.packets_sent:*"
+
+        endpoint_ok = False
+        perf_ok = False
+        perf_count = 0
+        packet_ok = False
+        packet_count = 0
+        recent_ok = False
+        recent_count = 0
+        # Cloud Logging end-to-end propagation for flow logs typically 30-60s,
+        # occasionally up to ~120s. 180s deadline, 15s interval.
+        poll_deadline = time.monotonic() + 180
+        while time.monotonic() < poll_deadline:
+            endpoint_ok, _ = _list_log_entries(endpoint_filter, max_results=1)
+            perf_ok, perf_count = _list_log_entries(perf_filter, max_results=5)
+            packet_ok, packet_count = _list_log_entries(packet_filter, max_results=5)
+            recent_ok, recent_count = _list_log_entries(endpoint_filter, max_results=5)
+            if endpoint_ok and perf_count > 0 and packet_count > 0 and recent_count > 0:
+                break
+            time.sleep(15)
+
+        result["tests"]["metrics_endpoint_reachable"] = {"passed": endpoint_ok}
         result["tests"]["performance_metric_present"] = {
             "passed": perf_ok and perf_count > 0,
             "namespace": LATENCY_NAMESPACE,
             "matching_entries": perf_count,
         }
-
-        # 3. Packet metric present: distinct narrow to packet-count fields
-        # ALSO bound to the target VPC.
-        packet_filter = flow_log_base + " AND jsonPayload.packets_sent:*"
-        packet_ok, flow_count = _list_log_entries(packet_filter, max_results=5)
         result["tests"]["packet_metric_present"] = {
-            "passed": packet_ok and flow_count > 0,
-            "flow_log_count": flow_count,
+            "passed": packet_ok and packet_count > 0,
+            "flow_log_count": packet_count,
         }
-
-        # 4. Samples recent: recent N-second window AND target-VPC scope.
-        # Recency check is meaningless without at least one matching entry
-        # bound to THIS network.
-        from datetime import datetime, timedelta
-
-        since = (datetime.now(UTC) - timedelta(seconds=sample_window)).isoformat()
-        recent_filter = flow_log_base + f' AND timestamp>="{since}"'
-        recent_ok, recent_count = _list_log_entries(recent_filter, max_results=5)
         result["tests"]["samples_recent"] = {
             "passed": recent_ok and recent_count > 0,
             "sample_window_seconds": sample_window,
             "matching_entries": recent_count,
         }
     except (gax.GoogleAPICallError, RuntimeError, TimeoutError) as e:
-        result["error_type"] = classify_gcp_error(e)[0]
-        result["error"] = classify_gcp_error(e)[1]
-        return result
-    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+        result["error_type"], result["error"] = classify_gcp_error(e)
+    finally:
+        if probe_created:
+            try:
+                delete_with_retry(
+                    lambda: wait_for_zonal_op(
+                        project,
+                        zone,
+                        instances_c.delete(project=project, zone=zone, instance=probe_vm_name).name,
+                        timeout=120,
+                    ),
+                    resource_desc=f"probe instance {probe_vm_name}",
+                )
+            except Exception:
+                # Probe-VM cleanup failure is logged via classify_gcp_error
+                # by the calling teardown step; do NOT mask the main result.
+                pass
+    result["success"] = bool(result["tests"]) and all(
+        t.get("passed", False) for t in result["tests"].values()
+    )
     return result
 
 
@@ -354,7 +475,7 @@ def main() -> int:
     if args.aspect == "hardware_faults":
         result = _hardware_faults(project, args.vpc_id)
     elif args.aspect == "latency_perf":
-        result = _latency_perf(project, args.vpc_id)
+        result = _latency_perf(project, args.region, args.vpc_id)
     else:
         result = _audit_trail(project, args.vpc_id)
     result["region"] = args.region

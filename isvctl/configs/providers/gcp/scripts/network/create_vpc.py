@@ -128,6 +128,14 @@ def main() -> int:
 
         for i, sub_cidr in enumerate(_carve_subnet_cidrs(args.cidr, 2)):
             sub_name = f"{network_name}-sub{i}"
+            # VPC Flow Logs ENABLED at subnet-create time. The released
+            # SdnLatencyPerfLoggingCheck requires real target-VPC samples
+            # in Cloud Logging (compute.googleapis.com%2Fvpc_flows). With
+            # log_config absent, Compute Engine defaults to disabled and
+            # the latency-perf probe finds zero scoped entries → failure.
+            # flow_sampling=1.0 + 5s aggregation + INCLUDE_ALL_METADATA
+            # captures every flow for the bounded test window so the
+            # downstream probe's traffic produces observable samples.
             op = subnets_client.insert(
                 project=project,
                 region=args.region,
@@ -137,6 +145,12 @@ def main() -> int:
                     ip_cidr_range=sub_cidr,
                     network=f"projects/{project}/global/networks/{network_name}",
                     region=args.region,
+                    log_config=compute_v1.SubnetworkLogConfig(
+                        enable=True,
+                        aggregation_interval="INTERVAL_5_SEC",
+                        flow_sampling=1.0,
+                        metadata="INCLUDE_ALL_METADATA",
+                    ),
                 ),
             )
             # Append BEFORE the wait — same partial-state-recovery argument.
