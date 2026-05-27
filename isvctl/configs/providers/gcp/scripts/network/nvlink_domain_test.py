@@ -31,8 +31,11 @@ Divergences from the AWS oracle:
     the literal does not resolve to a live instance, the probe still
     completes honestly: `node_resolved=true` for the input string +
     `nvlink_supported=false` for the absence-of-NVLink-hardware
-    finding. This is the "policy-skip" shape required by F-076 for
-    a documented portability gap, not a hard failure.
+    finding. The canonical policy-skip JSON shape for documented
+    portability gaps — `rc=0` + `success=true` + `nvlink_supported=
+    false` — mirrors `providers/shared/deploy_nim.py`'s missing-key
+    skip shape; the validator's `pytest.skip` is then the explicit
+    operator-visible outcome instead of a synthetic hard failure.
 """
 
 from __future__ import annotations
@@ -121,7 +124,10 @@ def main() -> int:
         # non-empty identifier and we completed the aggregated-list probe.
         # An instance absent from the project still produces a valid
         # detection outcome — the absence IS the answer (no NVLink hardware
-        # under that name). This mirrors the F-076 policy-skip shape.
+        # under that name). The canonical policy-skip JSON shape (rc=0 +
+        # success=true + nvlink_supported=false) is what surfaces an
+        # explicit "documented portability gap" outcome to the operator,
+        # not a hard failure.
         result["tests"]["node_resolved"] = {
             "passed": True,
             "node_id": args.node_id,
