@@ -85,12 +85,18 @@ def main() -> int:
         cstate = canonical_state(inst.status)
 
         if cstate == "stopped":
-            # Idempotent no-op: instance is already stopped; we did not
-            # issue a stop request, so honestly report stop_initiated=False
-            # (every reported boolean reflects a real action,
-            # not an aspirational success flag).
+            # Idempotent short-circuit: the instance is already in the
+            # target state. ``stop_initiated`` is a CONTRACT-shaped field —
+            # InstanceStopCheck reads it as "the stop end-state contract is
+            # satisfied", not "an API call was issued this run" — so it MUST
+            # be True here, matching the AWS oracle. Flipping it to False to
+            # mirror "no API called" makes the validator report FAILED on an
+            # instance that is in fact correctly stopped. The honest journal
+            # of which path executed lives in the distinct ``already_stopped``
+            # diagnostic flag, not in the contract-shaped field.
             result["state"] = cstate
-            result["stop_initiated"] = False
+            result["stop_initiated"] = True
+            result["already_stopped"] = True
             result["success"] = True
             print(f"  {args.instance_id} already stopped (no-op)", file=sys.stderr)
             print(json.dumps(result, indent=2, default=str))
