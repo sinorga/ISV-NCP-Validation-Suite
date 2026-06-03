@@ -262,6 +262,21 @@ def _service_account_resource(project: str, sa_email: str) -> str:
     return f"projects/{project}/serviceAccounts/{sa_email}"
 
 
+def _is_member_propagation_error(body: dict[str, Any]) -> bool:
+    """True if a setIamPolicy 400 body means the member SA has not propagated.
+
+    A freshly-created service account referenced as an IAM *member* is
+    eventually consistent: the policy write is rejected with HTTP 400
+    ('... does not exist') until the member converges (same window as the
+    TokenCreator binding handled in ``_mint_access_token``). Malformed-policy
+    400s (unknown member type, unsupported role) carry different text and are
+    intentionally NOT matched, so they stay non-retryable. ``body`` is the
+    parsed JSON from ``_http_error_body``; serialize it so the match works
+    whether the text lands in ``error.message`` or the ``raw`` fallback.
+    """
+    return "does not exist" in json.dumps(body).lower()
+
+
 def _modify_iam_policy(
     *,
     get_url: str,
@@ -273,6 +288,7 @@ def _modify_iam_policy(
     get_method: str = "POST",
     attempts: int = 5,
     backoff: float = 1.0,
+    member_propagation_delay: float = 0.0,
 ) -> bool:
     """Read-modify-write an IAM policy with etag retry.
 
@@ -353,12 +369,26 @@ def _modify_iam_policy(
             _http_request("POST", set_url, token, body={"policy": new_policy})
             return True
         except urllib.error.HTTPError as e:
-            last_error = f"setIamPolicy HTTP {e.code}: {_http_error_body(e)}"
+            body = _http_error_body(e)
+            last_error = f"setIamPolicy HTTP {e.code}: {body}"
+            # A brand-new SA referenced as a member is eventually consistent;
+            # setIamPolicy rejects the binding with HTTP 400 ('... does not
+            # exist') until it propagates (~3 min observed). Callers that add a
+            # just-created SA opt in via member_propagation_delay and retry the
+            # read-modify-write on a flat delay until the member converges.
+            if e.code == 400 and member_propagation_delay > 0 and _is_member_propagation_error(body):
+                print(
+                    f"  iam grant: member {member} not yet propagated; retrying in {member_propagation_delay:.0f}s",
+                    file=sys.stderr,
+                )
+                time.sleep(member_propagation_delay)
+                continue
             # 409 stale etag (refresh GET on next iter), 429 rate-limit, and 5xx
             # transient server errors all warrant the read-modify-write retry.
             if e.code in (409, 429) or 500 <= e.code < 600:
                 time.sleep(backoff * attempt)
                 continue
+            print(f"  setIamPolicy non-retryable: {last_error}", file=sys.stderr)
             return False
         except (urllib.error.URLError, TimeoutError, OSError) as e:
             # Same socket-level coverage as the getIamPolicy arm — mid-read
@@ -405,7 +435,16 @@ def _grant_target_role(
     token: str,
     sa_email: str,
 ) -> bool:
-    """Grant the allowed SA the target-VM serial-output role."""
+    """Grant the allowed SA the target-VM serial-output role.
+
+    ``sa_email`` is a probe SA created seconds earlier in this same step.
+    A brand-new SA referenced as an IAM member is eventually consistent, so
+    the instance setIamPolicy is rejected with HTTP 400 ('... does not exist')
+    until the member propagates. Opt into the member-propagation retry (flat
+    15s, ~3 min budget — the convergence window already documented on
+    ``_mint_access_token``) so the grant lands deterministically instead of
+    nondeterministically failing when the SA was minted moments ago.
+    """
     base = f"{_COMPUTE_BASE}/projects/{project}/zones/{zone}/instances/{instance}"
     return _modify_iam_policy(
         get_url=f"{base}/getIamPolicy",
@@ -415,6 +454,8 @@ def _grant_target_role(
         role=_ALLOWED_TARGET_ROLE,
         member=f"serviceAccount:{sa_email}",
         get_method="GET",
+        attempts=14,
+        member_propagation_delay=15.0,
     )
 
 
