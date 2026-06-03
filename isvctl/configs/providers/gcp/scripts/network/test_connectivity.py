@@ -29,11 +29,15 @@ Engine. Documented divergences:
   * VPC validation cross-checks subnetwork.network and firewall.network
     against the supplied network by EXACT tail match (scope-binding
     equality, never substring/startswith), via ``short_name``.
-  * The shared ``--sg-id`` firewall (from create_vpc) already allows
-    tcp:22 + icmp from 0.0.0.0/0, but it scopes to the whole network with
-    no target tags. VM1->VM2 PRIVATE ICMP is allowed by it, but to keep
-    the probe self-sufficient we create a small intra-VPC INGRESS firewall
-    allowing icmp+tcp from the validated subnets' CIDR ranges, suffixed,
+  * The shared ``--sg-id`` firewall (from create_vpc) allows tcp:22 ONLY
+    from the operator-trusted ranges (``NETWORK_FIREWALL_TRUST_IP``), never
+    0.0.0.0/0; create_vpc adds a SEPARATE network-wide ICMP rule. Both are
+    network-scoped (no target tags), so the workstation->VM1 public-SSH path
+    works whenever the runner's egress is within the trusted ranges — a
+    foundation/operator concern, not retried here. To keep VM1->VM2 PRIVATE
+    ICMP self-sufficient regardless of the shared rules' exact shape, we
+    still create a small intra-VPC INGRESS firewall allowing icmp+tcp from
+    the validated subnets' CIDR ranges (RFC1918, never 0.0.0.0/0), suffixed,
     targeting the probe network tag, and delete it in ``finally``.
   * This step uses the SHARED create_network VPC; it does NOT create its
     own network.
@@ -215,13 +219,13 @@ def main() -> int:
         key_priv, key_created = generate_ssh_keypair(key_name)
         ssh_pubkey = read_ssh_pubkey(key_priv)
 
-        # 3. Intra-VPC ICMP + TCP firewall. The shared --sg-id rule already
-        # allows tcp:22 + icmp from 0.0.0.0/0, but it carries no target
-        # tags. To keep the VM1->VM2 PRIVATE probe self-sufficient (and not
-        # depend on the shared rule's exact shape) we add a tag-scoped
-        # INGRESS rule sourced from the validated subnets' CIDR ranges. An
-        # allow rule MUST carry at least one Allowed with I_p_protocol set
-        # (empty allowed[] -> HTTP 400).
+        # 3. Intra-VPC ICMP + TCP firewall. The shared --sg-id rule allows
+        # tcp:22 only from the operator-trusted ranges (create_vpc's ICMP is
+        # a separate network-wide rule); neither carries target tags. To keep
+        # the VM1->VM2 PRIVATE probe self-sufficient (and not depend on the
+        # shared rules' exact shape) we add a tag-scoped INGRESS rule sourced
+        # from the validated subnets' CIDR ranges. An allow rule MUST carry at
+        # least one Allowed with I_p_protocol set (empty allowed[] -> HTTP 400).
         subnet_ranges: list[str] = []
         for subnet_id in subnet_ids:
             subnet = get_subnetwork(project, args.region, subnet_id)
