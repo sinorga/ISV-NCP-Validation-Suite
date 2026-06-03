@@ -1,0 +1,190 @@
+#!/usr/bin/env python3
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""Time security-policy propagation on Compute Engine (step ``sg_policy_propagation``).
+
+Translates the AWS provider's ``sg_policy_propagation_test`` to Compute Engine.
+Adds a probe firewall rule to the shared network and times how long until it is
+observable, then removes it and times until it is gone, asserting both are
+within ``--max-propagation-seconds`` (suite default 10, provider-neutral).
+
+Documented divergences from the AWS provider:
+
+  * Compute Engine has no security-group describe; the analog is
+    ``FirewallsClient.get`` on the probe firewall. The firewall control plane is
+    asynchronous — the insert Operation reaching DONE does not guarantee the
+    rule is observable yet, so propagation is timed by polling ``get`` until the
+    rule's ``allowed[]`` entry appears (add) and until ``get`` returns NotFound
+    (remove).
+  * A GCE firewall cannot carry an empty ``allowed[]`` (HTTP 400), so "revoke"
+    is modeled as ``FirewallsClient.delete`` (mirrors the sg_crud delete +
+    NotFound pattern), not as an in-place rule emptying.
+  * The probe rule allows tcp/443 (NOT an admin port) from a documentation test
+    range and is tag-scoped to a probe tag, so it neither touches the SSH/RDP
+    ingress guardrail (tcp/22 + tcp/3389) nor broadly applies to real VMs.
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import sys
+import time
+from pathlib import Path
+from typing import Any
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/scripts/
+
+from common.compute import resolve_project, unique_suffix
+from common.errors import delete_with_retry, handle_gcp_errors
+from common.network import (
+    build_firewall,
+    delete_firewall,
+    get_firewall,
+    insert_firewall,
+    make_allowed,
+)
+from google.api_core import exceptions as gax
+
+TEST_NAME = "sg_policy_propagation"
+TEST_NAMES = ("create_probe_rule", "rule_observed", "revoke_probe_rule", "removal_observed", "cleanup")
+
+# Probe firewall shape. tcp/443 is not an admin port (the SSH/RDP ingress
+# guardrail covers tcp/22 + tcp/3389 only); the source is RFC 5737 TEST-NET-1, a
+# documentation range that cannot route to real hosts, and the rule is tag-scoped
+# to a probe tag so it never broadly applies.
+_PROBE_PORT = "443"
+_PROBE_SOURCE = "192.0.2.0/24"
+_PROBE_TAG = "isv-prop-probe"
+# Poll generously past the 10s threshold so a genuinely slow propagation is
+# RECORDED (and fails the validator's timing assertion) rather than masked by a
+# tight poll deadline that would fail rule_observed instead. Fits the step's
+# 180s budget.
+_POLL_TIMEOUT_S = 60.0
+_POLL_INTERVAL_S = 0.5
+
+
+def _poll_until_visible(project: str, name: str, timeout: float) -> float:
+    """Poll ``get`` until the probe rule's allowed[] is visible; return wall-clock seconds."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        try:
+            fw = get_firewall(project, name)
+            if fw.allowed:
+                return time.monotonic() - start
+        except gax.NotFound:
+            pass
+        time.sleep(_POLL_INTERVAL_S)
+    raise RuntimeError(f"probe firewall {name!r} not observable via get() within {timeout}s")
+
+
+def _poll_until_gone(project: str, name: str, timeout: float) -> float:
+    """Poll ``get`` until the probe rule returns NotFound; return wall-clock seconds."""
+    start = time.monotonic()
+    while time.monotonic() - start < timeout:
+        try:
+            get_firewall(project, name)
+        except gax.NotFound:
+            return time.monotonic() - start
+        time.sleep(_POLL_INTERVAL_S)
+    raise RuntimeError(f"probe firewall {name!r} still observable via get() {timeout}s after delete")
+
+
+@handle_gcp_errors
+def main() -> int:
+    parser = argparse.ArgumentParser(description="Time security-policy propagation (GCP)")
+    parser.add_argument("--region", required=True, help="GCP region (informational; firewalls are global)")
+    parser.add_argument("--vpc-id", required=True, help="Shared network short name to bind the probe rule to")
+    parser.add_argument(
+        "--max-propagation-seconds",
+        type=float,
+        default=10.0,
+        help="Provider-neutral propagation threshold (suite-supplied; informational here)",
+    )
+    parser.add_argument("--project", default=None, help="GCP project ID (ADC fallback)")
+    args = parser.parse_args()
+
+    project = resolve_project(args.project)
+    fw_name = unique_suffix("isv-prop-fw")
+
+    result: dict[str, Any] = {
+        "success": False,
+        "platform": "network",
+        "test_name": TEST_NAME,
+        "tests": {name: {"passed": False} for name in TEST_NAMES},
+        "target_rule_id": None,
+        "add_observed_seconds": None,
+        "remove_observed_seconds": None,
+        "max_propagation_seconds": args.max_propagation_seconds,
+    }
+
+    fw_created = False
+    fw_deleted = False
+
+    try:
+        # create_probe_rule — insert a probe firewall on the shared network.
+        # insert_firewall waits for the global op to reach DONE. Stamp the
+        # tracker BEFORE the wait so a partial create still reaches cleanup.
+        probe = build_firewall(
+            fw_name,
+            args.vpc_id,
+            project,
+            direction="INGRESS",
+            allowed=[make_allowed("tcp", [_PROBE_PORT])],
+            source_ranges=[_PROBE_SOURCE],
+            target_tags=[_PROBE_TAG],
+        )
+        fw_created = True
+        insert_firewall(project, probe)
+        result["target_rule_id"] = fw_name
+        result["tests"]["create_probe_rule"] = {"passed": True}
+
+        # rule_observed — time from insert-op-DONE to first visible via get().
+        add_seconds = _poll_until_visible(project, fw_name, _POLL_TIMEOUT_S)
+        result["add_observed_seconds"] = round(add_seconds, 3)
+        result["tests"]["rule_observed"] = {"passed": True}
+
+        # revoke_probe_rule — model "revoke" as delete (empty allowed[] is 400).
+        delete_firewall(project, fw_name)
+        fw_deleted = True
+        result["tests"]["revoke_probe_rule"] = {"passed": True}
+
+        # removal_observed — time from delete to get() returning NotFound.
+        remove_seconds = _poll_until_gone(project, fw_name, _POLL_TIMEOUT_S)
+        result["remove_observed_seconds"] = round(remove_seconds, 3)
+        result["tests"]["removal_observed"] = {"passed": True}
+
+    except Exception as e:
+        result.setdefault("error", str(e))
+        result["success"] = False
+    finally:
+        # cleanup — ensure the probe rule is gone on success AND failure.
+        # NotFound inside delete_with_retry is idempotent success.
+        cleanup_ok = True
+        if fw_created and not fw_deleted:
+            cleanup_ok = delete_with_retry(delete_firewall, project, fw_name, resource_desc=f"firewall {fw_name}")
+        result["tests"]["cleanup"] = {"passed": cleanup_ok}
+        if not cleanup_ok:
+            result.setdefault("cleanup_errors", []).append(f"firewall {fw_name}")
+
+    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+
+    print(json.dumps(result, indent=2, default=str))
+    return 0 if result["success"] else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())
