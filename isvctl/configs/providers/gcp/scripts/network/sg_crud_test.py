@@ -72,6 +72,16 @@ from common.network import (
 )
 from google.api_core import exceptions as gax
 
+# Base tcp port the firewall CRUD lifecycle is built around. This is a pure
+# firewall-object CRUD test: it never launches a VM and never opens a
+# connection, so the port is an arbitrary placeholder that only needs to be
+# present/added/removed on read-back. It deliberately avoids the admin ports
+# tcp/22 (SSH) and tcp/3389 (RDP) — whose ingress is governed by
+# NETWORK_FIREWALL_TRUST_IP and must never open to 0.0.0.0/0 — so the rule is
+# honest about not being an SSH/RDP path. It must differ from the add/modify
+# ports (8080 / 9090) exercised below.
+BASE_PORT = "8000"
+
 
 def _allowed_ports(fw: Any, protocol: str) -> list[str]:
     """Return the ports configured for ``protocol`` in a firewall's allowed[]."""
@@ -138,7 +148,7 @@ def main() -> int:
                 network_name,
                 project,
                 direction="INGRESS",
-                allowed=[make_allowed("tcp", ["22"])],
+                allowed=[make_allowed("tcp", [BASE_PORT])],
                 source_ranges=["0.0.0.0/0"],
             ),
         )
@@ -177,7 +187,7 @@ def main() -> int:
                 network_name,
                 project,
                 direction="INGRESS",
-                allowed=[make_allowed("tcp", ["22", "8080"])],
+                allowed=[make_allowed("tcp", [BASE_PORT, "8080"])],
                 source_ranges=["0.0.0.0/0"],
             ),
         )
@@ -198,7 +208,7 @@ def main() -> int:
                 network_name,
                 project,
                 direction="INGRESS",
-                allowed=[make_allowed("tcp", ["22", "9090"])],
+                allowed=[make_allowed("tcp", [BASE_PORT, "9090"])],
                 source_ranges=["0.0.0.0/0"],
             ),
         )

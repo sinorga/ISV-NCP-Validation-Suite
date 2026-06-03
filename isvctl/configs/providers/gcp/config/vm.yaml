@@ -160,9 +160,12 @@ commands:
           - "{{ssh_user}}"
         timeout: 120
 
-      # 5. Stop (compute_v1.stop) — pre-gates on cloud-init. Cap parity
-      # with the AWS oracle stop step; cloud-init waits and op-poll
-      # retries are bounded by deadlines inside the stub.
+      # 5. Stop (compute_v1.stop) — pre-gates on cloud-init. The step cap
+      # must be strictly greater than the longest SINGLE internal wait:
+      # the 600s cloud-init `--wait` pre-gate and the 600s 'stopped' state
+      # poll. 900s gives headroom above that 600s deadline, matching the
+      # reboot step's cap. Internal waits are deadline-bounded inside the
+      # stub and return fast in practice, so the cap is not a sum.
       - name: stop_instance
         phase: test
         command: "python3 ../scripts/vm/stop_instance.py"
@@ -179,14 +182,16 @@ commands:
           - "{{steps.launch_instance.public_ip}}"
           - "--ssh-user"
           - "{{ssh_user}}"
-        timeout: 600
+        timeout: 900
 
-      # 6. Start (compute_v1.start) — re-reads fresh public IP. Cap
-      # parity with the AWS oracle's start step (AWS uses 300s, this is
-      # 2x to absorb GCP's slower compute_v1.start operation polling and
-      # cloud-init re-arming on g2-standard-8). SSH stability and
-      # cloud-init waits are bounded inside the stub via deadlines so
-      # this cap is not a sum of internal waits.
+      # 6. Start (compute_v1.start) — re-reads fresh public IP. The step
+      # cap must be strictly greater than the longest SINGLE internal
+      # wait: the 600s cloud-init `--wait` after start ('running' state
+      # poll, public-IP poll, and the SSH-stability gate are all shorter).
+      # 900s gives headroom above that 600s deadline, matching the reboot
+      # step's cap and absorbing GCP's slower compute_v1.start operation
+      # polling and cloud-init re-arming on g2-standard-8. Internal waits
+      # are deadline-bounded inside the stub, so the cap is not a sum.
       - name: start_instance
         phase: test
         command: "python3 ../scripts/vm/start_instance.py"
@@ -201,7 +206,7 @@ commands:
           - "{{steps.launch_instance.key_file}}"
           - "--ssh-user"
           - "{{ssh_user}}"
-        timeout: 600
+        timeout: 900
 
       # 7. Reset (compute_v1.reset) — SSH-drop wait + stability gate.
       # Cap parity with the AWS oracle reboot step; ssh-drop, ssh-stable,

@@ -69,10 +69,12 @@ TEST_NAMES = ("create_probe_rule", "rule_observed", "revoke_probe_rule", "remova
 _PROBE_PORT = "443"
 _PROBE_SOURCE = "192.0.2.0/24"
 _PROBE_TAG = "isv-prop-probe"
-# Poll generously past the 10s threshold so a genuinely slow propagation is
-# RECORDED (and fails the validator's timing assertion) rather than masked by a
-# tight poll deadline that would fail rule_observed instead. Fits the step's
-# 180s budget.
+# Poll generously past the threshold so a genuinely slow propagation is RECORDED
+# (and then fails the timing gate below) rather than masked by a tight poll
+# deadline that would fail rule_observed for the wrong reason. The recorded
+# add/remove seconds are gated against --max-propagation-seconds, so a
+# late-but-eventual transition still sets the subtest passed=false and overall
+# success=false. Fits the step's 180s budget.
 _POLL_TIMEOUT_S = 60.0
 _POLL_INTERVAL_S = 0.5
 
@@ -103,6 +105,23 @@ def _poll_until_gone(project: str, name: str, timeout: float) -> float:
     raise RuntimeError(f"probe firewall {name!r} still observable via get() {timeout}s after delete")
 
 
+def _threshold_subtest(observed: float, threshold: float, what: str) -> dict[str, Any]:
+    """Pass only if ``observed`` propagation time is within the suite threshold.
+
+    The diagnostic poll (``_POLL_TIMEOUT_S``) runs well past ``threshold`` so a
+    slow-but-eventual transition is recorded rather than masked, but exceeding
+    ``threshold`` fails the subtest (and hence overall ``success``). Mirrors the
+    AWS oracle, which fails ``rule_observed`` / ``removal_observed`` when the
+    transition is not observable within ``max_propagation_seconds``.
+    """
+    if observed <= threshold:
+        return {"passed": True}
+    return {
+        "passed": False,
+        "error": f"{what} took {observed:.2f}s, over the {threshold:.2f}s propagation threshold",
+    }
+
+
 @handle_gcp_errors
 def main() -> int:
     parser = argparse.ArgumentParser(description="Time security-policy propagation (GCP)")
@@ -112,7 +131,7 @@ def main() -> int:
         "--max-propagation-seconds",
         type=float,
         default=10.0,
-        help="Provider-neutral propagation threshold (suite-supplied; informational here)",
+        help="Provider-neutral propagation threshold (suite-supplied); add and remove must each be within it",
     )
     parser.add_argument("--project", default=None, help="GCP project ID (ADC fallback)")
     args = parser.parse_args()
@@ -153,9 +172,13 @@ def main() -> int:
         result["tests"]["create_probe_rule"] = {"passed": True}
 
         # rule_observed — time from insert-op-DONE to first visible via get().
+        # Gate the recorded time on the suite threshold (not the diagnostic poll
+        # window): a slow-but-eventual add fails the subtest + overall success.
         add_seconds = _poll_until_visible(project, fw_name, _POLL_TIMEOUT_S)
         result["add_observed_seconds"] = round(add_seconds, 3)
-        result["tests"]["rule_observed"] = {"passed": True}
+        result["tests"]["rule_observed"] = _threshold_subtest(
+            add_seconds, args.max_propagation_seconds, "probe rule add"
+        )
 
         # revoke_probe_rule — model "revoke" as delete (empty allowed[] is 400).
         delete_firewall(project, fw_name)
@@ -163,9 +186,12 @@ def main() -> int:
         result["tests"]["revoke_probe_rule"] = {"passed": True}
 
         # removal_observed — time from delete to get() returning NotFound.
+        # Gate the recorded time on the suite threshold, same as rule_observed.
         remove_seconds = _poll_until_gone(project, fw_name, _POLL_TIMEOUT_S)
         result["remove_observed_seconds"] = round(remove_seconds, 3)
-        result["tests"]["removal_observed"] = {"passed": True}
+        result["tests"]["removal_observed"] = _threshold_subtest(
+            remove_seconds, args.max_propagation_seconds, "probe rule removal"
+        )
 
     except Exception as e:
         result.setdefault("error", str(e))
@@ -179,8 +205,9 @@ def main() -> int:
         result["tests"]["cleanup"] = {"passed": cleanup_ok}
         if not cleanup_ok:
             result.setdefault("cleanup_errors", []).append(f"firewall {fw_name}")
-
-    result["success"] = all(t.get("passed", False) for t in result["tests"].values())
+        # Recompute overall success inside finally (oracle shape): every subtest
+        # — including the timing gates and cleanup — must pass.
+        result["success"] = all(t.get("passed", False) for t in result["tests"].values())
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1

@@ -116,9 +116,20 @@ _TOKENINFO_URL = "https://www.googleapis.com/oauth2/v1/tokeninfo"
 # --------------------------------------------------------------------- #
 
 
-def _ssh_allowed() -> list[Any]:
-    """Return a one-entry tcp:22 allow list (empty allowed[] is rejected with HTTP 400)."""
-    return [make_allowed("tcp", ["22"])]
+# Non-admin TCP port used purely to give each scoping firewall a non-empty
+# allowed[] (empty allowed[] is rejected with HTTP 400). These tests verify
+# firewall SCOPING — by target_tags, target_service_accounts, or subnet CIDR
+# in source_ranges — via instances.get / firewalls.get read-backs, NOT by
+# making a connection (every probe VM is launched with external_ip=False).
+# SSH/RDP are never exercised, so the rule deliberately avoids the admin ports
+# tcp/22 and tcp/3389 (whose ingress is governed by NETWORK_FIREWALL_TRUST_IP);
+# a non-admin port keeps the rule honest about what it does and what it does not.
+_PROBE_PORT = "8080"
+
+
+def _probe_allowed() -> list[Any]:
+    """Return a one-entry non-admin tcp allow list (empty allowed[] is rejected with HTTP 400)."""
+    return [make_allowed("tcp", [_PROBE_PORT])]
 
 
 # --------------------------------------------------------------------- #
@@ -167,7 +178,7 @@ def _drive_tag_scope(project: str, zone: str, scope: str) -> dict[str, Any]:
             network_name,
             project,
             direction="INGRESS",
-            allowed=_ssh_allowed(),
+            allowed=_probe_allowed(),
             source_ranges=["0.0.0.0/0"],
             target_tags=[test_tag],
         )
@@ -275,7 +286,7 @@ def _drive_subnet(project: str, zone: str) -> dict[str, Any]:
             network_name,
             project,
             direction="INGRESS",
-            allowed=_ssh_allowed(),
+            allowed=_probe_allowed(),
             source_ranges=[cidr_a],
         )
         firewall_created = True
@@ -483,7 +494,7 @@ def _drive_service(project: str, zone: str) -> dict[str, Any]:
             network_name,
             project,
             direction="INGRESS",
-            allowed=_ssh_allowed(),
+            allowed=_probe_allowed(),
             source_ranges=["0.0.0.0/0"],
             target_service_accounts=[sa_email],
         )
