@@ -9,10 +9,11 @@ This page covers the operator setup needed to run `isvctl` tests against GCP.
 | Domain | Config | Scripts | Test Suite |
 |--------|--------|---------|------------|
 | **VM** | [`providers/gcp/config/vm.yaml`](../../isvctl/configs/providers/gcp/config/vm.yaml) | [`providers/gcp/scripts/vm/`](../../isvctl/configs/providers/gcp/scripts/vm/) | [`suites/vm.yaml`](../../isvctl/configs/suites/vm.yaml) |
+| **Network** | [`providers/gcp/config/network.yaml`](../../isvctl/configs/providers/gcp/config/network.yaml) | [`providers/gcp/scripts/network/`](../../isvctl/configs/providers/gcp/scripts/network/) | [`suites/network.yaml`](../../isvctl/configs/suites/network.yaml) |
 
 Shared GCP utilities (compute helpers, SSH wrappers, retry envelopes, error classifiers) are in [`providers/gcp/scripts/common/`](../../isvctl/configs/providers/gcp/scripts/common/).
 
-Other domains (IAM, Network, Bare Metal, EKS, Control Plane, Image Registry, Security) are not yet implemented for GCP.
+Other domains (IAM, Bare Metal, EKS, Control Plane, Image Registry, Security) are not yet implemented for GCP.
 
 ## Prerequisites
 
@@ -97,6 +98,27 @@ This image is published by Google, ships with the NVIDIA driver + CUDA toolkit, 
 **Note on `ContainerRuntimeCheck`**: the `host_os` validator group includes `ContainerRuntimeCheck`, which asserts Docker is installed and runnable on the launched VM. It runs on every `vm` invocation regardless of `NGC_API_KEY`. On the default DLVM image this validator fails with `Docker not available`, and the run reports `[FAIL] TEST` even though every instance-lifecycle and NIM-policy-skip step passes. Only option 1 (a custom image with Docker preinstalled) produces a fully clean PASS.
 
 Operators without an NGC entitlement should pick option 2; operators with one and no custom image can install Docker on the default image inside their own cloud-init / startup-script, but the simplest path is a custom image where `docker run --gpus all` works at boot.
+
+## Operator environment variables
+
+The GCP suite reads these operator environment variables. Set the required ones
+before a `live` run — live mode is rejected when a required var is unset.
+
+| Variable | Required? | Default / fallback | Purpose |
+|----------|-----------|--------------------|---------|
+| `NETWORK_FIREWALL_TRUST_IP` | **Required** (vm, network) | none — fail closed (no fallback) | Trusted IPv4 source range(s) for SSH (tcp/22) and RDP (tcp/3389) firewall ingress. A bare IPv4 normalizes to `/32`; comma-separated IPv4 CIDRs are allowed. The suite never opens these admin ports from `0.0.0.0/0`: when this var is unset, empty, non-IPv4, or `0.0.0.0/0`, the affected step emits an operator error, sets `success=false`, and exits non-zero. |
+| `GCP_VM_IMAGE` | Optional (vm) | public DLVM family `common-cu129-ubuntu-2204-nvidia-580` | Operator image short-name or self-link for `launch_instance` (flows to `--ami-id`); resolves as exact-name, then family alias, under the image project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
+| `GCP_VM_IMAGE_PROJECT` | Optional (vm) | `deeplearning-platform-release` | Project hosting the operator image (flows to `--image-project`). When unset (and `GCP_VM_IMAGE` is also unset) the stub falls back to the public DLVM project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
+
+`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` (§3) and `NGC_API_KEY` (§4) are also
+read by the suite but are not part of the firewall / image-override contract
+above.
+
+```bash
+# Required before any GCP live run that creates or reuses SSH/RDP firewalls
+# (set to your workstation / CI egress IP — a single host normalizes to /32):
+export NETWORK_FIREWALL_TRUST_IP=203.0.113.10
+```
 
 ## Running GCP Validations
 
