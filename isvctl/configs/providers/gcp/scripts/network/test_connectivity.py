@@ -36,9 +36,12 @@ Engine. Documented divergences:
     works whenever the runner's egress is within the trusted ranges — a
     foundation/operator concern, not retried here. To keep VM1->VM2 PRIVATE
     ICMP self-sufficient regardless of the shared rules' exact shape, we
-    still create a small intra-VPC INGRESS firewall allowing icmp+tcp from
+    still create a small intra-VPC INGRESS firewall allowing ICMP only from
     the validated subnets' CIDR ranges (RFC1918, never 0.0.0.0/0), suffixed,
-    targeting the probe network tag, and delete it in ``finally``.
+    targeting the probe network tag, and delete it in ``finally``. tcp/22 is
+    deliberately NOT in this rule: the only SSH is workstation->VM1 over the
+    public IP (shared --sg-id rule), so adding tcp/22 here would open an
+    admin port from a broad LAN range with no probe that needs it.
   * This step uses the SHARED create_network VPC; it does NOT create its
     own network.
 
@@ -219,13 +222,17 @@ def main() -> int:
         key_priv, key_created = generate_ssh_keypair(key_name)
         ssh_pubkey = read_ssh_pubkey(key_priv)
 
-        # 3. Intra-VPC ICMP + TCP firewall. The shared --sg-id rule allows
-        # tcp:22 only from the operator-trusted ranges (create_vpc's ICMP is
-        # a separate network-wide rule); neither carries target tags. To keep
-        # the VM1->VM2 PRIVATE probe self-sufficient (and not depend on the
-        # shared rules' exact shape) we add a tag-scoped INGRESS rule sourced
-        # from the validated subnets' CIDR ranges. An allow rule MUST carry at
-        # least one Allowed with I_p_protocol set (empty allowed[] -> HTTP 400).
+        # 3. Intra-VPC ICMP firewall for the VM1->VM2 PRIVATE probe. That probe
+        # is ICMP-only (step 7 SSHes into VM1 over its PUBLIC IP — governed by
+        # the shared --sg-id rule's operator-trusted tcp:22 — then PINGs VM2's
+        # PRIVATE IP). No VM ever SSHes to another VM's private IP, so this
+        # tag-scoped rule needs ICMP only: adding tcp:22 here would open an
+        # admin port from the subnet CIDRs / 10.0.0.0/8, which the firewall
+        # ingress policy forbids (tcp/22 ingress must be env-derived, never a
+        # broad LAN range). To keep the private probe self-sufficient (and not
+        # depend on the shared rules' exact shape) the rule is sourced from the
+        # validated subnets' CIDR ranges. An allow rule MUST carry at least one
+        # Allowed with I_p_protocol set (empty allowed[] -> HTTP 400).
         subnet_ranges: list[str] = []
         for subnet_id in subnet_ids:
             subnet = get_subnetwork(project, args.region, subnet_id)
@@ -237,7 +244,7 @@ def main() -> int:
             args.vpc_id,
             project,
             direction="INGRESS",
-            allowed=[make_allowed("icmp"), make_allowed("tcp", ["22"])],
+            allowed=[make_allowed("icmp")],
             source_ranges=subnet_ranges or ["10.0.0.0/8"],
             target_tags=[ISV_NETWORK_TAG],
         )
