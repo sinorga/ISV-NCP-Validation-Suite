@@ -155,6 +155,30 @@ commands:
         args: ["--region", "{{region}}", "--zone", "{{zone}}", "--scope", "service"]
         timeout: 900
 
+      # Test 4j: SG port-security policy (tag-scoped single-TCP-port firewall +
+      # 2 VMs proving per-interface scoping + non-leakage via firewall
+      # read-back). >=600s: two VM creates + cleanup.
+      - name: sg_port_security_policy
+        phase: test
+        command: "python3 ../scripts/network/sg_port_security_policy.py"
+        args: ["--region", "{{region}}", "--zone", "{{zone}}", "--allowed-port", "8443"]
+        timeout: 600
+
+      # Test 4k: SG policy propagation timing (insert / observe / revoke /
+      # observe a probe firewall on the shared network; both transitions within
+      # max_propagation_seconds, suite-supplied + provider-neutral).
+      - name: sg_policy_propagation
+        phase: test
+        command: "python3 ../scripts/network/sg_policy_propagation_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--vpc-id"
+          - "{{steps.create_network.network_id}}"
+          - "--max-propagation-seconds"
+          - "10"
+        timeout: 180
+
       # Test 4g: SDN hardware-fault logging (Cloud Logging system events).
       - name: sdn_hardware_fault_logging
         phase: test
@@ -291,6 +315,27 @@ commands:
           - "10.91.0.0/16"
         timeout: 900
         output_schema: stable_ip
+
+      # Test 10b: Stable egress IP (DMS05-01) — launch an external-IP VM, SSH in,
+      # curl an external echo endpoint N times; every probe must report the same
+      # egress IP. >=900s: VM create + SSH-stability gate + N probes + cleanup.
+      - name: stable_egress_ip_test
+        phase: test
+        command: "python3 ../scripts/network/stable_egress_ip_test.py"
+        args:
+          - "--region"
+          - "{{region}}"
+          - "--zone"
+          - "{{zone}}"
+          - "--cidr"
+          - "10.100.0.0/16"
+          - "--endpoint"
+          - "https://api.ipify.org"
+          - "--probes"
+          - "3"
+          - "--interval-seconds"
+          - "2"
+        timeout: 900
 
       # Test 11: Floating IP (atomic static-IP reassociation, <20s).
       - name: floating_ip_test

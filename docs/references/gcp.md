@@ -9,10 +9,11 @@ This page covers the operator setup needed to run `isvctl` tests against GCP.
 | Domain | Config | Scripts | Test Suite |
 |--------|--------|---------|------------|
 | **VM** | [`providers/gcp/config/vm.yaml`](../../isvctl/configs/providers/gcp/config/vm.yaml) | [`providers/gcp/scripts/vm/`](../../isvctl/configs/providers/gcp/scripts/vm/) | [`suites/vm.yaml`](../../isvctl/configs/suites/vm.yaml) |
+| **Network** | [`providers/gcp/config/network.yaml`](../../isvctl/configs/providers/gcp/config/network.yaml) | [`providers/gcp/scripts/network/`](../../isvctl/configs/providers/gcp/scripts/network/) | [`suites/network.yaml`](../../isvctl/configs/suites/network.yaml) |
 
 Shared GCP utilities (compute helpers, SSH wrappers, retry envelopes, error classifiers) are in [`providers/gcp/scripts/common/`](../../isvctl/configs/providers/gcp/scripts/common/).
 
-Other domains (IAM, Network, Bare Metal, EKS, Control Plane, Image Registry, Security) are not yet implemented for GCP.
+Other domains (IAM, Bare Metal, EKS, Control Plane, Image Registry, Security) are not yet implemented for GCP.
 
 ## Prerequisites
 
@@ -119,6 +120,27 @@ Set it to the public egress IP/CIDR of the host running the suite (for a
 cloud runner, its NAT egress range). The VM suite's launch firewall sets its
 `sourceRanges` to the normalized list, and a pre-existing rule that allows
 `0.0.0.0/0` on tcp/22 is not eligible for verified-reuse.
+
+## Operator environment variables
+
+The GCP suite reads these operator environment variables. Set the required ones
+before a `live` run — live mode is rejected when a required var is unset.
+
+| Variable | Required? | Default / fallback | Purpose |
+|----------|-----------|--------------------|---------|
+| `NETWORK_FIREWALL_TRUST_IP` | **Required** (vm, network) | none — fail closed (no fallback) | Trusted IPv4 source range(s) for SSH (tcp/22) and RDP (tcp/3389) firewall ingress. A bare IPv4 normalizes to `/32`; comma-separated IPv4 CIDRs are allowed. The suite never opens these admin ports from `0.0.0.0/0`: when this var is unset, empty, non-IPv4, or `0.0.0.0/0`, the affected step emits an operator error, sets `success=false`, and exits non-zero. |
+| `GCP_VM_IMAGE` | Optional (vm) | public DLVM family `common-cu129-ubuntu-2204-nvidia-580` | Operator image short-name or self-link for `launch_instance` (flows to `--ami-id`); resolves as exact-name, then family alias, under the image project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
+| `GCP_VM_IMAGE_PROJECT` | Optional (vm) | `deeplearning-platform-release` | Project hosting the operator image (flows to `--image-project`). When unset (and `GCP_VM_IMAGE` is also unset) the stub falls back to the public DLVM project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
+
+`GOOGLE_CLOUD_PROJECT` / `GCLOUD_PROJECT` (§3) and `NGC_API_KEY` (§4) are also
+read by the suite but are not part of the firewall / image-override contract
+above.
+
+```bash
+# Required before any GCP live run that creates or reuses SSH/RDP firewalls
+# (set to your workstation / CI egress IP — a single host normalizes to /32):
+export NETWORK_FIREWALL_TRUST_IP=203.0.113.10
+```
 
 ## Running GCP Validations
 
