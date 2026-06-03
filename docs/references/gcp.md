@@ -98,6 +98,28 @@ This image is published by Google, ships with the NVIDIA driver + CUDA toolkit, 
 
 Operators without an NGC entitlement should pick option 2; operators with one and no custom image can install Docker on the default image inside their own cloud-init / startup-script, but the simplest path is a custom image where `docker run --gpus all` works at boot.
 
+### 6. Trusted SSH ingress source (`NETWORK_FIREWALL_TRUST_IP`) — required
+
+The VM suite opens an SSH (tcp/22) firewall rule so it can reach the launched
+probe VM. There is **no open-internet default**: the only trusted source for
+that ingress is the operator environment variable `NETWORK_FIREWALL_TRUST_IP`.
+It is **required** — if it is unset, empty, non-IPv4, or normalizes to
+`0.0.0.0/0`, `launch_instance` fails fast with an operator error and the run
+exits non-zero before creating any resource.
+
+```bash
+# A single operator IP (normalizes to a /32 host rule):
+export NETWORK_FIREWALL_TRUST_IP=203.0.113.4
+
+# Or one/more IPv4 CIDRs (comma-separated):
+export NETWORK_FIREWALL_TRUST_IP=203.0.113.0/24,198.51.100.0/24
+```
+
+Set it to the public egress IP/CIDR of the host running the suite (for a
+cloud runner, its NAT egress range). The VM suite's launch firewall sets its
+`sourceRanges` to the normalized list, and a pre-existing rule that allows
+`0.0.0.0/0` on tcp/22 is not eligible for verified-reuse.
+
 ## Running GCP Validations
 
 ```bash

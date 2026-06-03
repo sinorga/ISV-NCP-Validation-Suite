@@ -1,6 +1,18 @@
 #!/usr/bin/env python3
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
-# SPDX-License-Identifier: LicenseRef-NvidiaProprietary
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
 
 """Console RBAC probe for Compute Engine serial console access.
 
@@ -11,9 +23,9 @@ The suite contract requires three subtests:
 
 GCP has no AWS-style ``simulate_principal_policy`` equivalent for Compute
 Engine serial console access (``instances.testIamPermissions`` and
-``instances.getSerialPortOutput`` both evaluate the caller). Per the
-reviewed GCP knowledge file, RBAC evidence must come from REAL probe
-principals:
+``instances.getSerialPortOutput`` both evaluate the caller). Because the
+APIs evaluate the caller rather than a simulated principal, RBAC evidence
+must come from REAL probe principals:
 
   * a denied service account WITHOUT
     ``compute.instances.getSerialPortOutput`` on the target VM,
@@ -37,7 +49,7 @@ for projects where the operator cannot allow IAM mutation. The fallback
 is opt-in via the env vars themselves; otherwise the self-provisioned
 path runs.
 
-Per the reviewed knowledge file (target_sdk_quirks #4 / #5):
+Compute Engine serial-console RBAC implementation notes:
   * Direct IAMCredentials REST token minting is the stable path. Avoid
     ``google.auth.impersonated_credentials.Credentials`` with local
     authorized-user ADC — its refresh code can call a private
@@ -92,11 +104,10 @@ _TOKENINFO_URL = "https://oauth2.googleapis.com/tokeninfo"
 _HTTP_TIMEOUT_S = 30
 
 # Minimal predefined role granting serial-port-output read. ``roles/
-# compute.viewer`` includes the permission and is broader than necessary;
-# the knowledge file lists it as the acceptable predefined role for this
-# probe ("``roles/compute.viewer`` or an equivalent minimal serial-output
-# custom role"). A custom role would be tighter but requires extra
-# provisioning the probe does not need.
+# compute.viewer`` includes the permission and is broader than necessary,
+# but is the acceptable predefined role for this probe (an equivalent
+# minimal serial-output custom role would be tighter but requires extra
+# provisioning the probe does not need).
 _ALLOWED_TARGET_ROLE = "roles/compute.viewer"
 _TOKEN_CREATOR_ROLE = "roles/iam.serviceAccountTokenCreator"
 
