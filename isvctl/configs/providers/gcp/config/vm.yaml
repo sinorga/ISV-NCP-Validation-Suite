@@ -192,12 +192,26 @@ commands:
       # step's cap and absorbing GCP's slower compute_v1.start operation
       # polling and cloud-init re-arming on g2-standard-8. Internal waits
       # are deadline-bounded inside the stub, so the cap is not a sum.
+      #
+      # --instance-id reads from stop_instance (launch_instance fallback)
+      # rather than launch_instance directly. start_instance.py hard-gates
+      # on the canonical 'stopped' state (mirrors the AWS oracle: a start
+      # against a running VM is an error, so the lifecycle proves a real
+      # stop→start transition, not a no-op). stop_instance is the only step
+      # that stops the VM, so it is a true ordering dependency of this step.
+      # The orchestrator derives per-step live-slice scope purely from
+      # {{steps.*}} references, so without a stop_instance reference an
+      # isolated start_instance slice would skip stop_instance, leave the VM
+      # RUNNING, and fail the stopped precondition. Reading instance_id from
+      # stop_instance keeps it in scope (mirroring how reboot_instance
+      # chains start_instance.public_ip); the boolean-mode launch_instance
+      # default keeps the value resolving if stop_instance is ever absent.
       - name: start_instance
         phase: test
         command: "python3 ../scripts/vm/start_instance.py"
         args:
           - "--instance-id"
-          - "{{steps.launch_instance.instance_id}}"
+          - "{{steps.stop_instance.instance_id | default(steps.launch_instance.instance_id, true)}}"
           - "--region"
           - "{{region}}"
           - "--zone"
