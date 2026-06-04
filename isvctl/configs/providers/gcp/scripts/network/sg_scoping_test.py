@@ -383,9 +383,22 @@ def _bind_service_account_user(sa_email: str, member: str) -> None:
     iam.set_iam_policy(request=request)
 
 
-def _delete_target_sa(sa_email: str) -> None:
-    """Delete the test-owned SA (eventually-consistent; raises NotFound when gone)."""
-    iam_admin_v1.IAMClient().delete_service_account(name=f"projects/-/serviceAccounts/{sa_email}")
+def _delete_target_sa(sa_email: str) -> bool:
+    """Delete the test-owned SA with bounded retry; return True iff it is gone.
+
+    NotFound / already-absent counts as success (the eventual-consistency
+    window is absorbed by the retry). Returns False only when a documented
+    transient IAM failure (rate-limit / 5xx / timeout) persists past the retry
+    budget, so the caller can fold the genuine leak into the cleanup error
+    list. Wraps ``common.errors.delete_with_retry`` — the canonical GCP cleanup
+    envelope used for every other delete here.
+    """
+    iam = iam_admin_v1.IAMClient()
+    return delete_with_retry(
+        iam.delete_service_account,
+        name=f"projects/-/serviceAccounts/{sa_email}",
+        resource_desc=f"service account {sa_email}",
+    )
 
 
 def _insert_instance_with_iam_propagation(
@@ -582,7 +595,9 @@ def _cleanup(
     """Best-effort teardown of every created resource. Returns a list of error strings.
 
     Dependency order: instances -> firewalls -> service accounts -> subnets
-    -> networks. SA deletion is eventually-consistent — log but never block.
+    -> networks. SA deletion retries the eventual-consistency / transient IAM
+    window (NotFound counts as gone); a genuine post-retry leak is recorded as
+    a cleanup error so the step cannot report a clean cleanup while leaking.
     """
     errors: list[str] = []
 
@@ -595,12 +610,8 @@ def _cleanup(
             errors.append(f"delete firewall {name}")
 
     for sa_email in service_accounts or ():
-        try:
-            _delete_target_sa(sa_email)
-        except gax.NotFound:
-            pass
-        except Exception as e:  # eventually-consistent: log, do not block
-            print(f"  warn: delete SA {sa_email} (non-blocking): {e}", file=sys.stderr)
+        if not _delete_target_sa(sa_email):
+            errors.append(f"delete service account {sa_email}")
 
     for name in subnets:
         if not delete_with_retry(delete_subnetwork, project, region, name, resource_desc=f"subnetwork {name}"):

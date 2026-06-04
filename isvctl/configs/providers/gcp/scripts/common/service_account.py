@@ -47,10 +47,12 @@ from typing import Any, cast
 import google.auth
 import google.auth.credentials
 import google.auth.transport.requests
-from common.network import insert_instance
 from google.api_core import exceptions as gax
 from google.cloud import iam_admin_v1
 from google.iam.v1 import iam_policy_pb2, policy_pb2
+
+from common.errors import delete_with_retry
+from common.network import insert_instance
 
 # IAM propagation budget: a freshly-created serviceAccountUser binding is not
 # effective on instances.insert immediately; GCE returns permission-denied /
@@ -122,9 +124,25 @@ def bind_service_account_user(sa_email: str, member: str) -> None:
     iam.set_iam_policy(request=request)
 
 
-def delete_service_account(sa_email: str) -> None:
-    """Delete the test-owned SA (eventually-consistent; raises NotFound when gone)."""
-    iam_admin_v1.IAMClient().delete_service_account(name=f"projects/-/serviceAccounts/{sa_email}")
+def delete_service_account(sa_email: str) -> bool:
+    """Delete the test-owned SA with bounded retry; return True iff it is gone.
+
+    Returns True when the SA was deleted now OR is already absent (NotFound is
+    the desired terminal state — the eventual-consistency window is absorbed by
+    the retry). Returns False only when a documented transient IAM failure
+    (rate-limit / 5xx / timeout) persists past the retry budget, so the caller
+    can fold the genuine leak into ``cleanup_errors`` / ``tests.cleanup.passed``
+    / overall ``success`` rather than silently orphaning a project-level SA.
+    Wraps the canonical GCP cleanup envelope (``common.errors.delete_with_retry``)
+    so SA cleanup matches every other cloud-delete in these stubs and the GCP VM
+    ``console_rbac`` bool contract.
+    """
+    iam = iam_admin_v1.IAMClient()
+    return delete_with_retry(
+        iam.delete_service_account,
+        name=f"projects/-/serviceAccounts/{sa_email}",
+        resource_desc=f"service account {sa_email}",
+    )
 
 
 def insert_instance_with_iam_propagation(project: str, zone: str, instance: Any) -> None:

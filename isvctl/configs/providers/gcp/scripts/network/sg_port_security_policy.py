@@ -94,7 +94,6 @@ from common.service_account import (
     insert_instance_with_iam_propagation,
     resolve_principal_member,
 )
-from google.api_core import exceptions as gax
 
 TEST_NAME = "sg_port_security_policy"
 TEST_NAMES = (
@@ -292,15 +291,13 @@ def main() -> int:
             cleanup_errors.append(f"instance {other_vm}")
         if fw_created and not delete_with_retry(delete_firewall, project, fw_name, resource_desc=f"firewall {fw_name}"):
             cleanup_errors.append(f"firewall {fw_name}")
-        # SA delete is eventually-consistent — attempt it but never block the
-        # step on it (mirrors sg_service_scoping); NotFound means already gone.
-        if other_sa_email:
-            try:
-                delete_service_account(other_sa_email)
-            except gax.NotFound:
-                pass
-            except Exception as e:  # eventually-consistent: log, do not block
-                print(f"  warn: delete SA {other_sa_email} (non-blocking): {e}", file=sys.stderr)
+        # delete_service_account retries documented transient IAM failures and
+        # returns a bool: NotFound / already-gone counts as success (the
+        # eventual-consistency window is absorbed by the retry), so only a
+        # genuine post-retry leak folds into cleanup_errors. The step must not
+        # report a clean cleanup while a project-level SA is orphaned.
+        if other_sa_email and not delete_service_account(other_sa_email):
+            cleanup_errors.append(f"service account {other_sa_email}")
         if subnet_created and not delete_with_retry(
             delete_subnetwork, project, region, subnet_name, resource_desc=f"subnetwork {subnet_name}"
         ):
