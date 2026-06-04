@@ -86,8 +86,17 @@ TEST_NAMES = (
 )
 
 
-def _firewall_allows_port(fw: Any, port: str) -> bool:
-    """True iff the firewall has a tcp Allowed entry listing ``port``."""
+def _firewall_allows_port(fw: Any, port: str, expected_sources: list[str]) -> bool:
+    """True iff ``fw`` permits tcp ``port`` AND its source ranges exactly match ``expected_sources``.
+
+    Mirrors the AWS oracle's ``_tcp_port_allowed`` (protocol + port + expected
+    CIDR): the source range is part of the port-security policy shape, so a
+    firewall permitting the port from a broader or different range must NOT
+    count as the expected policy. Source ranges are compared for set equality
+    against the exact value the policy firewall was created with.
+    """
+    if set(fw.source_ranges or ()) != set(expected_sources):
+        return False
     for entry in fw.allowed or ():
         if entry.I_p_protocol.lower() == "tcp" and port in list(entry.ports or ()):
             return True
@@ -175,10 +184,18 @@ def main() -> int:
         insert_firewall(project, policy_fw)
         result["tests"]["apply_port_policy"] = {"passed": True}
 
-        # allowed_port_permitted / unlisted_port_blocked — read back allowed[].
+        # allowed_port_permitted / unlisted_port_blocked — read back the full
+        # rule shape (tcp port + source range == the test subnet CIDR), not just
+        # allowed[]. Mirrors the AWS oracle, which gates the permit/block checks
+        # on the expected CIDR too, so a port allowed from a broader/different
+        # source cannot fake-pass the policy.
         live_fw = get_firewall(project, fw_name)
-        result["tests"]["allowed_port_permitted"] = {"passed": _firewall_allows_port(live_fw, allowed_port)}
-        result["tests"]["unlisted_port_blocked"] = {"passed": not _firewall_allows_port(live_fw, unlisted_port)}
+        result["tests"]["allowed_port_permitted"] = {
+            "passed": _firewall_allows_port(live_fw, allowed_port, [subnet_cidr])
+        }
+        result["tests"]["unlisted_port_blocked"] = {
+            "passed": not _firewall_allows_port(live_fw, unlisted_port, [subnet_cidr])
+        }
 
         # other_interface_unaffected — a SECOND VM carrying a DIFFERENT tag. The
         # firewall targets only the policy tag, so it does not select this VM.
