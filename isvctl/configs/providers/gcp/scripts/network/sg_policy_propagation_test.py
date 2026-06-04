@@ -201,13 +201,23 @@ def main() -> int:
         )
 
         # revoke_probe_rule — model "revoke" as delete (empty allowed[] is 400).
+        # delete_firewall waits for the delete op to reach DONE, but op-DONE
+        # does NOT prove get() already returns NotFound (same async lag as
+        # insert), so the firewall is NOT yet confirmed gone here. Do NOT stamp
+        # fw_deleted now: only the _poll_until_gone NotFound below proves
+        # removal, and stamping early would let a slow/partial delete skip the
+        # finally re-delete and still report cleanup passed.
         delete_firewall(project, fw_name)
-        fw_deleted = True
         result["tests"]["revoke_probe_rule"] = {"passed": True}
 
         # removal_observed — time from delete to get() returning NotFound.
         # Gate the recorded time on the suite threshold, same as rule_observed.
         remove_seconds = _poll_until_gone(project, fw_name, _POLL_TIMEOUT_S)
+        # Removal is now confirmed observable (get() returned NotFound), so mark
+        # the firewall deleted and let finally skip the idempotent re-delete. If
+        # _poll_until_gone raised, fw_deleted stays False and finally re-attempts
+        # deletion via delete_with_retry — cleanup fails if it cannot complete.
+        fw_deleted = True
         result["remove_observed_seconds"] = round(remove_seconds, 3)
         result["tests"]["removal_observed"] = _threshold_subtest(
             remove_seconds, args.max_propagation_seconds, "probe rule removal"
