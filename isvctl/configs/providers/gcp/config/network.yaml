@@ -157,12 +157,15 @@ commands:
 
       # Test 4j: SG port-security policy (tag-scoped single-TCP-port firewall +
       # 2 VMs proving per-interface scoping + non-leakage via firewall
-      # read-back). >=600s: two VM creates + cleanup.
+      # read-back). The non-target VM carries a distinct self-created SA, so
+      # this step does the same SA-create + IAM-propagation + 2-VM work as the
+      # sg_service_scoping service scope. >=900s: 180s SA IAM propagation +
+      # two VM creates + cleanup (matches sg_service_scoping's budget).
       - name: sg_port_security_policy
         phase: test
         command: "python3 ../scripts/network/sg_port_security_policy.py"
         args: ["--region", "{{region}}", "--zone", "{{zone}}", "--allowed-port", "8443"]
-        timeout: 600
+        timeout: 900
 
       # Test 4k: SG policy propagation timing (insert / observe / revoke /
       # observe a probe firewall on the shared network; both transitions within
