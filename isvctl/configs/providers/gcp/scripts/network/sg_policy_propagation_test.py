@@ -27,8 +27,12 @@ Documented divergences from the AWS provider:
     ``FirewallsClient.get`` on the probe firewall. The firewall control plane is
     asynchronous — the insert Operation reaching DONE does not guarantee the
     rule is observable yet, so propagation is timed by polling ``get`` until the
-    rule's ``allowed[]`` entry appears (add) and until ``get`` returns NotFound
-    (remove).
+    probe rule's EXACT expected shape — tcp/443, the probe source range, and the
+    probe target tag — is observable (add) and until ``get`` returns NotFound
+    (remove). Polling on the full shape (mirroring the AWS oracle's
+    ``_permission_present``, which confirms protocol + port + expected CIDR)
+    rather than on any non-empty ``allowed[]`` keeps a broader or different
+    firewall from faking propagation success.
   * A GCE firewall cannot carry an empty ``allowed[]`` (HTTP 400), so "revoke"
     is modeled as ``FirewallsClient.delete`` (mirrors the sg_crud delete +
     NotFound pattern), not as an in-place rule emptying.
@@ -79,18 +83,34 @@ _POLL_TIMEOUT_S = 60.0
 _POLL_INTERVAL_S = 0.5
 
 
+def _probe_rule_observable(fw: Any) -> bool:
+    """True iff ``fw`` matches the EXACT probe shape: tcp/443, source range, target tag.
+
+    Mirrors the AWS oracle's ``_permission_present`` (protocol + port + expected
+    CIDR) rather than treating any non-empty ``allowed[]`` as propagated.
+    Compute Engine additionally tag-scopes the rule, so the probe tag is
+    verified too. Source ranges and target tags are checked for set equality
+    against the exact values the probe was created with, so a broader or
+    different firewall cannot fake propagation success.
+    """
+    has_tcp_port = any(
+        entry.I_p_protocol.lower() == "tcp" and _PROBE_PORT in list(entry.ports or ()) for entry in (fw.allowed or ())
+    )
+    return has_tcp_port and set(fw.source_ranges or ()) == {_PROBE_SOURCE} and set(fw.target_tags or ()) == {_PROBE_TAG}
+
+
 def _poll_until_visible(project: str, name: str, timeout: float) -> float:
-    """Poll ``get`` until the probe rule's allowed[] is visible; return wall-clock seconds."""
+    """Poll ``get`` until the probe rule's EXACT expected shape is visible; return wall-clock seconds."""
     start = time.monotonic()
     while time.monotonic() - start < timeout:
         try:
             fw = get_firewall(project, name)
-            if fw.allowed:
+            if _probe_rule_observable(fw):
                 return time.monotonic() - start
         except gax.NotFound:
             pass
         time.sleep(_POLL_INTERVAL_S)
-    raise RuntimeError(f"probe firewall {name!r} not observable via get() within {timeout}s")
+    raise RuntimeError(f"probe firewall {name!r} not observable with expected shape via get() within {timeout}s")
 
 
 def _poll_until_gone(project: str, name: str, timeout: float) -> float:
