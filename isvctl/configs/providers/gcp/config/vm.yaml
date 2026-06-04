@@ -264,17 +264,30 @@ commands:
           - "{{steps.reboot_instance.ssh_user | default(ssh_user, true)}}"
         timeout: 1800
 
-      # 10. Teardown NIM (shared paramiko script). Non-empty sentinel
-      # defaults so an upstream skip doesn't collapse the args (empty
-      # defaults are DROPPED by the orchestrator's _render_args).
+      # 10. Teardown NIM (shared paramiko script). The host/key chain
+      # resolves to a RUNNING NIM host, falling through to the non-empty
+      # "none" sentinel (which the shared script treats as a policy-skip:
+      # success=True / skipped=True) when none exists. deploy_nim above
+      # only ever deploys onto steps.reboot_instance.public_ip, so a
+      # post-reboot host (or its start_instance predecessor) is the only
+      # place a NIM container can live. launch_instance is deliberately
+      # NOT a fallback here: stop_instance releases the ephemeral external
+      # IP, so launch_instance.public_ip is stale/unreachable after a stop
+      # and SSH to it hangs until the step times out. Dropping it lets a
+      # stop-terminal run (e.g. the stop_instance per-step slice, where
+      # start/reboot/deploy_nim are skipped) fall through to "none" and
+      # policy-skip instead of timing out. The non-empty sentinel also
+      # keeps the argv pair from collapsing (empty defaults are DROPPED by
+      # the orchestrator's _render_args). The full domain run is unchanged:
+      # reboot_instance.public_ip wins as before.
       - name: teardown_nim
         phase: teardown
         command: "python3 ../../shared/teardown_nim.py"
         args:
           - "--host"
-          - "{{steps.reboot_instance.public_ip | default(steps.start_instance.public_ip, true) | default(steps.launch_instance.public_ip, true) | default('none', true)}}"
+          - "{{steps.reboot_instance.public_ip | default(steps.start_instance.public_ip, true) | default('none', true)}}"
           - "--key-file"
-          - "{{steps.reboot_instance.key_file | default(steps.start_instance.key_file, true) | default(steps.launch_instance.key_file, true) | default('none', true)}}"
+          - "{{steps.reboot_instance.key_file | default(steps.start_instance.key_file, true) | default('none', true)}}"
           - "--user"
           - "{{steps.reboot_instance.ssh_user | default(ssh_user, true)}}"
         timeout: 180
