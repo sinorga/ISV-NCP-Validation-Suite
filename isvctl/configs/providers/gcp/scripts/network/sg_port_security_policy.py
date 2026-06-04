@@ -194,9 +194,20 @@ def main() -> int:
         other_created = True
         insert_instance(project, zone, other_resource)
         poll_instance_state(project, zone, other_vm, target_canonical="running", timeout=300)
+
+        # TWO INDEPENDENT read-backs (mirrors AWS reading both ENIs and the
+        # sg_scoping_test two-read shape): prove the firewall targets the
+        # policy tag, the TARGET VM actually carries that tag (else a firewall
+        # scoped to a tag no VM has would fake-pass), and the OTHER VM does not.
+        target_inst = get_instance(project, zone, target_vm)
+        target_inst_tags = list(target_inst.tags.items) if target_inst.tags else []
         other_inst = get_instance(project, zone, other_vm)
         other_inst_tags = list(other_inst.tags.items) if other_inst.tags else []
-        unaffected = (list(live_fw.target_tags or ()) == [target_tag]) and (target_tag not in other_inst_tags)
+        unaffected = (
+            (list(live_fw.target_tags or ()) == [target_tag])
+            and (target_tag in target_inst_tags)
+            and (target_tag not in other_inst_tags)
+        )
         result["tests"]["other_interface_unaffected"] = {"passed": unaffected}
 
     except Exception as e:
