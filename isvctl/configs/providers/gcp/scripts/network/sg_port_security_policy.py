@@ -35,10 +35,22 @@ Documented divergences from the AWS provider:
     Compute Engine exposes), not a live connectivity probe.
   * Scoping uses distinct network TAGS: the target VM carries the policy tag and
     the firewall targets it; the second VM carries a DIFFERENT non-empty tag, so
-    the firewall genuinely does not select it (the sg_service_scoping
-    ``service_accounts=[]``-collapses-to-default caveat is specific to SA
-    scoping and does not apply to tag scoping). No SSH / admin-port firewall is
-    created, so this step does not depend on NETWORK_FIREWALL_TRUST_IP.
+    the firewall genuinely does not select it.
+  * The non-leakage proof additionally pins a genuinely INDEPENDENT identity on
+    the second VM: it carries a DISTINCT, self-created non-empty service account
+    (created + ``serviceAccountUser``-bound + deleted in-test, exactly the
+    sg_service_scoping pattern). A distinct SA — never ``service_accounts=[]``,
+    which the proto-plus client serializes identically to unset and which
+    collapses to the shared default Compute SA, reading as a fake-pass — keeps
+    the negative observation from resting on tag-only evidence.
+    ``other_interface_unaffected`` therefore gates on a read-back of the
+    firewall target plus BOTH VMs' identities: the firewall targets only the
+    policy tag, the target VM carries it, and the second VM neither carries it
+    nor shares the target's identity (it carries its own distinct SA).
+  * No SSH / admin-port firewall is created, so this step does not depend on
+    NETWORK_FIREWALL_TRUST_IP. It DOES require the operator ADC principal to be
+    able to create a service account and set its IAM policy — the same
+    dependency the released sg_service_scoping (service scope) already relies on.
 """
 
 from __future__ import annotations
@@ -46,6 +58,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -74,6 +87,14 @@ from common.network import (
     insert_subnetwork,
     make_allowed,
 )
+from common.service_account import (
+    bind_service_account_user,
+    create_service_account,
+    delete_service_account,
+    insert_instance_with_iam_propagation,
+    resolve_principal_member,
+)
+from google.api_core import exceptions as gax
 
 TEST_NAME = "sg_port_security_policy"
 TEST_NAMES = (
@@ -129,6 +150,14 @@ def main() -> int:
     other_vm = unique_suffix("isv-portsec-other")
     target_tag = unique_suffix("isv-portsec-tag")
     other_tag = unique_suffix("isv-portsec-othertag")
+    # Distinct, self-created SA for the non-target VM (independent identity
+    # evidence; see module docstring). account_id: <=30 chars, lowercase
+    # alnum+hyphen, starts with a letter. RUN_ID alone is shared across a run,
+    # so a same-run retry after a delayed/failed SA delete would reuse the id
+    # and hit ALREADY_EXISTS; fold a fresh per-invocation token in BEFORE the
+    # run suffix ("isv-ps-oth-" 11 + 4 token + "-" + 6 run = 22 chars).
+    invocation_disc = uuid.uuid4().hex[:4]
+    other_account_id = unique_suffix(f"isv-ps-oth-{invocation_disc}", length=6)[:30]
 
     result: dict[str, Any] = {
         "success": False,
@@ -142,6 +171,10 @@ def main() -> int:
     fw_created = False
     target_created = False
     other_created = False
+    # Email string is set BEFORE create_service_account so the finally block
+    # always attempts SA cleanup (delete is NotFound-idempotent), even on a
+    # partial create. Mirrors sg_service_scoping's SA cleanup discipline.
+    other_sa_email: str | None = None
 
     try:
         # Self-contained custom-mode network + subnet. Stamp each *_created
@@ -197,8 +230,16 @@ def main() -> int:
             "passed": not _firewall_allows_port(live_fw, unlisted_port, [subnet_cidr])
         }
 
-        # other_interface_unaffected — a SECOND VM carrying a DIFFERENT tag. The
-        # firewall targets only the policy tag, so it does not select this VM.
+        # other_interface_unaffected — a SECOND VM carrying a DIFFERENT tag AND
+        # a DISTINCT, self-created non-empty service account (independent
+        # identity evidence; see module docstring). Self-create the SA and bind
+        # the operator ADC principal to serviceAccountUser so the VM-attach
+        # succeeds, exactly as sg_service_scoping does. The email string is set
+        # first so cleanup always runs.
+        other_sa_email = f"{other_account_id}@{project}.iam.gserviceaccount.com"
+        create_service_account(project, other_account_id, display_name="ISV sg_port_security_policy non-target SA")
+        bind_service_account_user(other_sa_email, resolve_principal_member())
+
         other_resource = build_probe_instance(
             project=project,
             zone=zone,
@@ -207,23 +248,30 @@ def main() -> int:
             subnet_name=subnet_name,
             external_ip=False,
             network_tags=[other_tag],
+            service_accounts=[other_sa_email],
         )
         other_created = True
-        insert_instance(project, zone, other_resource)
+        # Attaching a fresh SA needs actAs; retry while the binding propagates.
+        insert_instance_with_iam_propagation(project, zone, other_resource)
         poll_instance_state(project, zone, other_vm, target_canonical="running", timeout=300)
 
         # TWO INDEPENDENT read-backs (mirrors AWS reading both ENIs and the
         # sg_scoping_test two-read shape): prove the firewall targets the
         # policy tag, the TARGET VM actually carries that tag (else a firewall
-        # scoped to a tag no VM has would fake-pass), and the OTHER VM does not.
+        # scoped to a tag no VM has would fake-pass), and the OTHER VM carries
+        # neither the target tag NOR the target's identity — it holds its own
+        # distinct, non-empty SA, so the negative observation rests on a
+        # genuinely independent identity rather than tag-only evidence.
         target_inst = get_instance(project, zone, target_vm)
         target_inst_tags = list(target_inst.tags.items) if target_inst.tags else []
         other_inst = get_instance(project, zone, other_vm)
         other_inst_tags = list(other_inst.tags.items) if other_inst.tags else []
+        other_inst_sas = {sa.email for sa in (other_inst.service_accounts or ())}
         unaffected = (
             (list(live_fw.target_tags or ()) == [target_tag])
             and (target_tag in target_inst_tags)
             and (target_tag not in other_inst_tags)
+            and (other_sa_email in other_inst_sas)
         )
         result["tests"]["other_interface_unaffected"] = {"passed": unaffected}
 
@@ -244,6 +292,15 @@ def main() -> int:
             cleanup_errors.append(f"instance {other_vm}")
         if fw_created and not delete_with_retry(delete_firewall, project, fw_name, resource_desc=f"firewall {fw_name}"):
             cleanup_errors.append(f"firewall {fw_name}")
+        # SA delete is eventually-consistent — attempt it but never block the
+        # step on it (mirrors sg_service_scoping); NotFound means already gone.
+        if other_sa_email:
+            try:
+                delete_service_account(other_sa_email)
+            except gax.NotFound:
+                pass
+            except Exception as e:  # eventually-consistent: log, do not block
+                print(f"  warn: delete SA {other_sa_email} (non-blocking): {e}", file=sys.stderr)
         if subnet_created and not delete_with_retry(
             delete_subnetwork, project, region, subnet_name, resource_desc=f"subnetwork {subnet_name}"
         ):
