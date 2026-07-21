@@ -35,5 +35,5 @@
       }
     }
   },
-  "source_repo": "git@github.com:NVIDIA/ISV-NCP-Validation-Suite.git"
+  "source_repo": "git@github.com:NVIDIA/ai-cloud-validation.git"
 }
