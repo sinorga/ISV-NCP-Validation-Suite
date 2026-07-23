@@ -70,8 +70,14 @@ from google.cloud import compute_v1
 _FALSY_SENTINELS = {"", "none", "null", "false"}
 
 # Per-attempt op waits, bounded so delete_with_retry does not multiply budgets.
-_TEARDOWN_INSTANCE_WAIT_S = 180
-_TEARDOWN_FIREWALL_WAIT_S = 120
+# A Compute Engine instance delete detaches and reclaims the boot disk before the
+# zonal operation reports DONE, so the op routinely runs past the earlier 180s
+# ceiling. Giving up there raised a TimeoutError and reported an in-progress
+# delete as a failed cleanup, so the wait must be long enough to observe the
+# operation reach its terminal DONE state. 300s/180s hold real margin over that
+# drain while staying well under the 900s step timeout.
+_TEARDOWN_INSTANCE_WAIT_S = 300
+_TEARDOWN_FIREWALL_WAIT_S = 180
 
 
 def _truthy(arg: str | None) -> bool:
@@ -160,6 +166,10 @@ def main() -> int:
     instance_ok = True
     firewall_ok = True
     key_ok = True
+    # Collects the classified per-resource reason for any FAILED cloud delete so
+    # the structured error names WHICH resource failed and WHY (a generic
+    # "one or more deletes failed" is undiagnosable from the orchestrator log).
+    cleanup_errors: list[str] = []
 
     # 0. Local SSH key pair — LOCAL-ONLY, run before any cloud preflight so an
     # expired-ADC failure can never leave private-key material behind. Gated on
@@ -187,7 +197,12 @@ def main() -> int:
     if instance_created and instance_id:
         print(f"Deleting host {instance_id} in {zone}...", file=sys.stderr)
         instance_ok = delete_with_retry(
-            _delete_instance_op, project, zone, instance_id, resource_desc=f"instance {instance_id}"
+            _delete_instance_op,
+            project,
+            zone,
+            instance_id,
+            resource_desc=f"instance {instance_id}@{zone}",
+            error_sink=cleanup_errors,
         )
         if instance_ok:
             result["resources_deleted"].append(f"instance:{instance_id}@{zone}")
@@ -214,6 +229,7 @@ def main() -> int:
                 leak_zone,
                 instance_id,
                 resource_desc=f"instance {instance_id}@{leak_zone}",
+                error_sink=cleanup_errors,
             )
             if leak_ok:
                 result["resources_deleted"].append(f"instance:{instance_id}@{leak_zone}")
@@ -224,7 +240,9 @@ def main() -> int:
     # the AWS-parity intent switch.
     if firewall_created and args.delete_security_group and fw_name:
         print(f"Deleting SSH firewall {fw_name}...", file=sys.stderr)
-        firewall_ok = delete_with_retry(_delete_firewall_op, project, fw_name, resource_desc=f"firewall {fw_name}")
+        firewall_ok = delete_with_retry(
+            _delete_firewall_op, project, fw_name, resource_desc=f"firewall {fw_name}", error_sink=cleanup_errors
+        )
         if firewall_ok:
             result["resources_deleted"].append(f"firewall:{fw_name}")
     elif fw_name:
@@ -242,7 +260,11 @@ def main() -> int:
         result["message"] = f"Deleted {len(result['resources_deleted'])} observability host resource(s)"
     else:
         result["message"] = f"Cleanup partial: instance_ok={instance_ok}, firewall_ok={firewall_ok}, key_ok={key_ok}"
-        result["error"] = "One or more observability host teardown operations failed"
+        detail = "; ".join(cleanup_errors) if cleanup_errors else "no per-resource detail captured"
+        if not key_ok and not cleanup_errors:
+            detail = f"local SSH key delete failed: {key_file}"
+        result["cleanup_errors"] = cleanup_errors
+        result["error"] = f"One or more observability host teardown operations failed: {detail}"
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1

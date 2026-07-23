@@ -29,7 +29,6 @@
 # workload's `kubectl api-resources --api-group=kubeflow.org` prerequisite probe
 # and its kubeflow.org/v2beta1 MPIJob objects resolve. Setup gates on the CRD
 # becoming Established and the controller Deployment becoming Available.
----
 apiVersion: v1
 kind: Namespace
 metadata:

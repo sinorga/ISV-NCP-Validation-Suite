@@ -56,6 +56,12 @@ from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
 from common.errors import retry_idempotent
+from common.ownership import (
+    description_with_invocation,
+    has_invocation_description,
+    new_invocation_id,
+    submit_owned_create,
+)
 
 # --------------------------------------------------------------------- #
 # Auth / project resolution                                             #
@@ -104,6 +110,17 @@ def resolve_project(arg_value: str | None = None) -> str:
 # --------------------------------------------------------------------- #
 
 
+def _run_id_suffix(length: int = 8) -> str:
+    """Return the suite ``RUN_ID`` (or a fresh UUID8) truncated to ``length``.
+
+    Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g. manual stub
+    invocation without the harness setting the env var). MUST NOT raise on a
+    missing env var — that would block ad-hoc reproduction.
+    """
+    sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
+    return sid[:length] if sid else uuid.uuid4().hex[:length]
+
+
 def unique_suffix(base: str, *, length: int = 8) -> str:
     """Append the suite's ``RUN_ID`` (or a fresh UUID8) to ``base``.
 
@@ -123,8 +140,107 @@ def unique_suffix(base: str, *, length: int = 8) -> str:
     The helper MUST NOT raise on missing env var — that would block
     ad-hoc reproduction.
     """
+    return f"{base}-{_run_id_suffix(length)}"
+
+
+# Compute Engine resource names (network, subnetwork, instance, firewall,
+# disk, ...) MUST match ``[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?`` — at most 63
+# characters, start with a lowercase letter, end with a letter or digit. A name
+# longer than this is rejected PRE-ACCEPTANCE with an HTTP 400
+# ``Invalid value for field`` error, so any derived name must be bounded.
+GCE_MAX_NAME_LENGTH = 63
+
+
+def bounded_unique_name(prefix: str, *segments: str, length: int = 8, max_length: int = GCE_MAX_NAME_LENGTH) -> str:
+    """Compose a Compute-Engine-valid ``<prefix>[-seg...]-<runid>`` name (<=63 chars).
+
+    ``unique_suffix`` alone overflows the 63-char Compute Engine name limit when
+    ``prefix`` is long — e.g. a step-isolated config folds the full step name
+    into a globally named resource arg, so ``isv-observability-net-<step>`` plus
+    the per-invocation discriminator and the terminal run-id suffix exceeds 63
+    and the create is rejected with HTTP 400 ``Invalid value for field``.
+
+    This composer keeps the uniqueness-and-sweep-critical trailing parts intact —
+    every explicit ``segment`` (the per-invocation discriminator, an optional
+    role/index like ``subnet-0``) AND the terminal run-id suffix (the orphan
+    sweep matches names ENDING in the run id) — and truncates ONLY ``prefix``
+    from the right when the composed name would exceed ``max_length``. A trailing
+    ``-`` left by the trim is stripped so the name never contains ``--`` or ends
+    on a dash. For a prefix that already fits, the output is byte-identical to
+    ``unique_suffix(f"{prefix}-{'-'.join(segments)}")`` so short-name callers are
+    unaffected.
+    """
+    tail = "-".join([*segments, _run_id_suffix(length)])
+    keep = max(max_length - len(tail) - 1, 1)  # -1 for the dash joining prefix + tail
+    trimmed_prefix = prefix[:keep].rstrip("-") or prefix[:1]
+    return f"{trimmed_prefix}-{tail}"
+
+
+# Compute Engine resource names (network, subnetwork, instance, firewall, ...)
+# must match ``[a-z](?:[-a-z0-9]{0,61}[a-z0-9])?`` — at most 63 characters. The
+# API rejects a longer name with an HTTP 400 before any resource is created.
+GCE_NAME_MAX_LEN = 63
+
+
+def scoped_gce_name(base: str, *, infix: str = "", length: int = 8, max_len: int = GCE_NAME_MAX_LEN) -> str:
+    """Compose a run-scoped, GCE-length-valid resource name.
+
+    Layout is ``<base>[-<infix>]-<runid>`` — the same shape ``unique_suffix``
+    produces, but the composed name is clamped to Compute Engine's ``max_len``
+    (63) character limit so a long operator-supplied ``base`` (e.g. a
+    step-discriminated ``--name``) can never emit an API-invalid name.
+
+    Only ``base`` is truncated: the run id stays TERMINAL (the run-id-scoped
+    orphan sweep matches names ending in the run id) and any per-invocation
+    discriminator carried in ``infix`` is preserved verbatim (it is the
+    parallel-collision guard between sibling step-isolation jobs that share one
+    RUN_ID). A trailing hyphen left by truncation is stripped so the result
+    stays a valid GCE name. When ``RUN_ID`` is unset the run slug falls back to a
+    fresh UUID8, mirroring ``unique_suffix`` so ad-hoc reproduction still works.
+    """
     sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
-    return f"{base}-{sid[:length] if sid else uuid.uuid4().hex[:length]}"
+    run = sid[:length] if sid else uuid.uuid4().hex[:length]
+    tail = f"-{infix}-{run}" if infix else f"-{run}"
+    budget = max_len - len(tail)
+    trimmed = base[: max(budget, 1)].rstrip("-")
+    if not trimmed:
+        trimmed = base[:1] or "x"
+    return f"{trimmed}{tail}"
+
+
+# Compute Engine resource names (networks, subnetworks, instances, firewalls)
+# must match RFC1035: 1-63 chars, lowercase-letter start, only [-a-z0-9], no
+# trailing hyphen. A long run-scoped base plus a step-isolation discriminator
+# plus the terminal run-id can exceed 63; bounded_unique_suffix keeps the name
+# legal without dropping the uniqueness/orphan-sweep tail.
+GCP_NAME_MAX_LEN = 63
+
+
+def bounded_unique_suffix(prefix: str, suffix: str = "", *, length: int = 8, max_len: int = GCP_NAME_MAX_LEN) -> str:
+    """``unique_suffix`` that clamps the composed name to GCP's 63-char cap.
+
+    Composes ``{prefix}{suffix}-{run_id}``. The ``suffix`` (a per-invocation
+    discriminator plus any role tag, e.g. ``-a1b2-subnet-0``) and the TERMINAL
+    run-id are ALWAYS preserved intact so sibling step-isolation jobs stay
+    collision-free (the disc) and the run-id-scoped orphan sweep still matches
+    (the trailing run id). Only the human-readable ``prefix`` is truncated, and
+    only when the full name would exceed ``max_len``. When the composed name
+    already fits, the output is byte-identical to
+    ``unique_suffix(f"{prefix}{suffix}")``. The result is always a valid GCP
+    resource name (lowercase-letter start, no trailing hyphen).
+    """
+    sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
+    run = sid[:length] if sid else uuid.uuid4().hex[:length]
+    tail = f"{suffix}-{run}"
+    room = max_len - len(tail)
+    if room < 1:
+        # Degenerate: suffix + run id alone already fill the cap. Keep a legal,
+        # run-id-terminal slice (drop any leading/trailing hyphen).
+        return tail.lstrip("-")[:max_len].rstrip("-") or run[:max_len]
+    trimmed = prefix[:room].rstrip("-")
+    if not trimmed:
+        return tail.lstrip("-")
+    return f"{trimmed}{tail}"
 
 
 # --------------------------------------------------------------------- #
@@ -1155,16 +1271,23 @@ def insert_ssh_firewall(
     name: str,
     network_short: str,
     source_ranges: list[str],
+    *,
+    on_accepted: Callable[[], None] | None = None,
 ) -> tuple[str, Any]:
     """Submit a verified-reuse SSH firewall insert and return ``(name, op)``.
 
-    Stamp-before-wait split of the previous ``ensure_ssh_firewall``
-    (cleanup-tracker sub-rule): the caller stamps
-    ``firewall_created=True`` IMMEDIATELY after this
-    function returns ``op != None``, BEFORE running ``wait_for_global_op``.
-    A post-insert wait failure then leaves the caller with the truthful
-    ``firewall_created=True`` so cleanup-on-failure deletes the
-    accepted-but-uncomfirmed rule.
+    Ambiguous-acknowledgement ownership (cleanup-provenance rule): a Compute
+    Engine ``firewalls.insert`` can commit the rule server-side and then lose the
+    response to a transport disconnect / 5xx. Recording ownership only after a
+    clean ``insert()`` return would leak such a committed rule, because teardown
+    gates on the caller's ``firewall_created`` flag. The create is therefore
+    MARKED with a per-invocation discriminator in ``description`` and submitted
+    through ``submit_owned_create``: on a clean accept OR on an ambiguous ack that
+    exact-name readback confirms carries this invocation's marker, ``on_accepted``
+    fires so the caller stamps ``firewall_created=True`` BEFORE any op wait. A
+    definite ``Conflict`` never transfers ownership — it routes to verified-reuse
+    adoption below. ``on_accepted`` is optional so other-domain callers that do
+    not (yet) need the ownership callback keep the prior return-then-stamp flow.
 
     ``source_ranges`` is the operator-trusted IPv4 source list resolved from
     ``NETWORK_FIREWALL_TRUST_IP`` (see ``resolve_trusted_ssh_source_ranges``).
@@ -1176,7 +1299,7 @@ def insert_ssh_firewall(
     caller MUST block on ``wait_for_global_op(project, op.name, ...)``.
 
     Adoption is gated on the same checks as before: ownership marker present,
-    description matches what we'd produce, shape matches
+    base description matches what we'd produce, shape matches
     (network/direction/source-ranges/target tag/tcp22).
     """
     fw_client = compute_v1.FirewallsClient()
@@ -1189,15 +1312,27 @@ def insert_ssh_firewall(
     rule.priority = 1000
     rule.source_ranges = list(source_ranges)
     rule.target_tags = [ISV_NETWORK_TAG]
-    rule.description = _ISV_FIREWALL_DESCRIPTION
+    # Firewall rules carry no labels field, so the per-invocation ownership marker
+    # is embedded in the description (readback echoes it verbatim).
+    invocation_id = new_invocation_id()
+    rule.description = description_with_invocation(_ISV_FIREWALL_DESCRIPTION, invocation_id)
 
     allowed = compute_v1.Allowed()
     allowed.I_p_protocol = "tcp"
     allowed.ports = ["22"]
     rule.allowed = [allowed]
 
+    def _submit() -> Any:
+        return fw_client.insert(project=project, firewall_resource=rule)
+
+    def _read_back() -> compute_v1.Firewall:
+        return fw_client.get(project=project, firewall=name)
+
+    def _owns(existing: compute_v1.Firewall) -> bool:
+        return has_invocation_description(existing, invocation_id)
+
     try:
-        op = fw_client.insert(project=project, firewall_resource=rule)
+        op = submit_owned_create(_submit, _read_back, _owns, on_accepted=on_accepted)
     except gax.Conflict:
         existing = retry_idempotent(
             fw_client.get,
@@ -1210,9 +1345,12 @@ def insert_ssh_firewall(
                 f"firewall {name!r} exists in {project} without ownership marker "
                 f"{_ISV_OWNERSHIP_MARKER!r}; refusing to adopt"
             ) from None
-        if (existing.description or "") != _ISV_FIREWALL_DESCRIPTION:
+        # The stored description now carries a per-invocation marker suffix, so a
+        # rule from a prior invocation legitimately differs after the base text;
+        # require the base description as a PREFIX rather than exact equality.
+        if not (existing.description or "").startswith(_ISV_FIREWALL_DESCRIPTION):
             raise RuntimeError(
-                f"firewall {name!r} description differs: expected "
+                f"firewall {name!r} description differs: expected prefix "
                 f"{_ISV_FIREWALL_DESCRIPTION!r}, got {existing.description!r}"
             ) from None
         if not _firewall_matches_ssh_shape(existing, network_short, source_ranges):

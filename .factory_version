@@ -22,8 +22,8 @@
         "isv_commit": "562f594dde6cb3a7ea1b63ddfd5217a9ed5a5467"
       },
       "observability": {
-        "factory_commit": "56ff4845df3132d8d6ae8f68110a013510c5215c",
-        "isv_commit": "7042c2deafe769e83206906545629152d09f53a6"
+        "factory_commit": "bade4edbb86d95dfdbcdfbe9715c930e50ccb993",
+        "isv_commit": "25ad740248f126e28ecfedc1d2fd7bb5df3a9abc"
       },
       "security": {
         "factory_commit": "2369f85ec5e7d9bc9d84d42504204178b8e9220d",
