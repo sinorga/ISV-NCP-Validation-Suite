@@ -16,9 +16,9 @@
 
 """GCP observability log and telemetry availability tests (test phase).
 
-The GCP port of the AWS oracle ``log_availability_test.py``. It emits the same
-four provider-neutral aspects, each with the validator-named subtests, derived
-from REAL Google Cloud signals:
+The GCP port of the AWS oracle ``log_availability_test.py``. It emits the
+provider-neutral aspects, each with the validator-named subtests, derived from
+REAL Google Cloud signals:
 
   * ``vpc_flow_logs``     — live ``Subnetwork.log_config`` read-back (there is no
                             standalone flow-log object or native traffic-type
@@ -40,6 +40,17 @@ from REAL Google Cloud signals:
   * ``bmc_gpu_telemetry`` — provider-hidden for the same reason. Google documents
                             guest GPU metrics via Ops Agent / NVML / DCGM only;
                             those are never relabeled as BMC telemetry.
+  * ``fabric_manager_logs`` / ``ufm_event_logs`` / ``subnet_manager_logs`` /
+    ``general_switch_logs`` / ``switch_syslogs`` / ``switch_kernel_logs`` —
+                            provider-hidden physical fabric / subnet-manager /
+                            switch log planes. Compute Engine exposes none of
+                            these to tenant projects, so each emits provider-hidden
+                            evidence after the same real ``ProjectsClient.get_project``
+                            identity probe (guest syslog / VPC Flow Logs are never
+                            substituted as fabric evidence). All six validators are
+                            enabled; each passes on the validator-supported
+                            provider-hidden path (every required subtest passed=true
+                            + provider_hidden=true) after the identity probe.
 
 AWS reference implementation:
     ../../aws/scripts/observability/log_availability_test.py
@@ -91,6 +102,51 @@ ASPECT_TESTS: dict[str, list[str]] = {
         "host_os_gap_identified",
         "telemetry_samples_recent",
     ],
+    "ufm_event_logs": [
+        "event_log_endpoint_reachable",
+        "event_log_source_present",
+        "event_entries_queryable",
+    ],
+    "fabric_manager_logs": [
+        "log_endpoint_reachable",
+        "log_source_present",
+        "log_entries_queryable",
+    ],
+    "subnet_manager_logs": [
+        "log_endpoint_reachable",
+        "log_source_present",
+        "log_entries_queryable",
+    ],
+    "general_switch_logs": [
+        "log_endpoint_reachable",
+        "switch_log_source_present",
+        "entries_queryable",
+    ],
+    "switch_syslogs": [
+        "syslog_endpoint_reachable",
+        "switch_syslog_source_present",
+        "entries_recent",
+    ],
+    "switch_kernel_logs": [
+        "log_endpoint_reachable",
+        "kernel_log_source_present",
+        "entries_queryable",
+    ],
+}
+
+# Aspects Compute Engine does not expose to tenants, and the count-probe field
+# each aspect's validator expects in the provider-hidden evidence. BMC SEL /
+# Redfish GPU telemetry and the physical fabric / subnet-manager / switch log
+# planes are all provider-owned on Compute Engine.
+HIDDEN_ASPECT_PROBE_FIELDS: dict[str, str] = {
+    "bmc_sel_logs": "bmc_endpoints_checked",
+    "bmc_gpu_telemetry": "bmc_endpoints_checked",
+    "ufm_event_logs": "log_endpoints_checked",
+    "fabric_manager_logs": "log_endpoints_checked",
+    "subnet_manager_logs": "log_endpoints_checked",
+    "general_switch_logs": "switches_checked",
+    "switch_syslogs": "switches_checked",
+    "switch_kernel_logs": "switches_checked",
 }
 
 JOURNALCTL_ISO_TS = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}[+\-]\d{4})")
@@ -120,6 +176,16 @@ GCP_NO_CUSTOMER_BMC_MESSAGE = (
     "Compute Engine bare metal is fully managed by Google; no customer-accessible BMC SEL logs "
     "or Redfish GPU telemetry API is exposed (guest GPU metrics use Ops Agent / NVML / DCGM)"
 )
+GCP_NO_CUSTOMER_FABRIC_MESSAGE = (
+    "Compute Engine does not expose provider-owned physical fabric-manager, subnet-manager, UFM, "
+    "or switch log endpoints to tenant projects (guest syslog / VPC Flow Logs are not fabric evidence)"
+)
+
+
+def _hidden_message(aspect: str, project: str) -> str:
+    """Return the provider-hidden explanation for a customer-inaccessible aspect."""
+    base = GCP_NO_CUSTOMER_BMC_MESSAGE if aspect.startswith("bmc_") else GCP_NO_CUSTOMER_FABRIC_MESSAGE
+    return f"{base} (project {project} reachable)."
 
 
 def _passed(message: str, probes: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -138,13 +204,13 @@ def _failed(error: str, probes: dict[str, Any] | None = None) -> dict[str, Any]:
     return result
 
 
-def _provider_hidden(test_name: str, *, project: str) -> dict[str, Any]:
-    """Build a passing provider-hidden subtest result for the managed BMC plane."""
+def _provider_hidden(test_name: str, *, aspect: str, project: str) -> dict[str, Any]:
+    """Build a passing provider-hidden subtest result for a customer-inaccessible aspect."""
     return {
         "passed": True,
         "provider_hidden": True,
-        "probes": {"bmc_endpoints_checked": 0},
-        "message": f"{test_name}: {GCP_NO_CUSTOMER_BMC_MESSAGE} (project {project} reachable).",
+        "probes": {HIDDEN_ASPECT_PROBE_FIELDS[aspect]: 0},
+        "message": f"{test_name}: {_hidden_message(aspect, project)}",
     }
 
 
@@ -463,9 +529,9 @@ def _probe_project_identity(project: str) -> str:
 
     The idempotent Resource Manager read is retried on the typed transient
     bucket and raw transport drops via ``retry_idempotent`` (a single 429/5xx no
-    longer aborts the provider-hidden BMC path). Once transient budget is spent,
-    or on any non-transient error, it raises the underlying Resource Manager
-    error so the caller records a real control-plane failure instead of emitting
+    longer aborts a provider-hidden path). Once transient budget is spent, or on
+    any non-transient error, it raises the underlying Resource Manager error so
+    the caller records a real control-plane failure instead of emitting
     provider-hidden evidence for an unreachable project.
     """
     proj = retry_idempotent(
@@ -476,18 +542,15 @@ def _probe_project_identity(project: str) -> str:
     return proj.project_id or project
 
 
-def check_bmc_sel_logs(project: str) -> dict[str, Any]:
-    """Emit provider-hidden BMC SEL evidence after a real project-identity probe."""
-    return _check_provider_hidden_bmc(project, "bmc_sel_logs")
+def _check_provider_hidden_aspect(project: str, aspect: str) -> dict[str, Any]:
+    """Shared provider-hidden path: probe project identity, then emit hidden evidence.
 
-
-def check_bmc_gpu_telemetry(project: str) -> dict[str, Any]:
-    """Emit provider-hidden BMC GPU telemetry evidence after a project-identity probe."""
-    return _check_provider_hidden_bmc(project, "bmc_gpu_telemetry")
-
-
-def _check_provider_hidden_bmc(project: str, aspect: str) -> dict[str, Any]:
-    """Shared provider-hidden path: probe project identity, then emit hidden evidence."""
+    Covers the managed BMC plane (SEL / Redfish GPU telemetry) and the physical
+    fabric / subnet-manager / UFM / switch log planes — none is exposed to tenant
+    projects on Compute Engine. The Resource Manager identity probe proves the
+    tenant control plane is reachable before the provider-hidden pass; a probe
+    failure is recorded as a real control-plane error, never a hidden pass.
+    """
     result = _base_result(aspect)
     try:
         project_id = _probe_project_identity(project)
@@ -495,12 +558,12 @@ def _check_provider_hidden_bmc(project: str, aspect: str) -> dict[str, Any]:
         error_type, error_msg = classify_gcp_error(e)
         result["error_type"] = error_type
         result["error"] = error_msg
-        probes = {"bmc_endpoints_checked": 0}
+        probes = {HIDDEN_ASPECT_PROBE_FIELDS[aspect]: 0}
         for name in ASPECT_TESTS[aspect]:
             result["tests"][name] = _failed(f"GCP project identity probe failed: {error_msg}", probes)
         return result
 
-    result["tests"] = {name: _provider_hidden(name, project=project_id) for name in ASPECT_TESTS[aspect]}
+    result["tests"] = {name: _provider_hidden(name, aspect=aspect, project=project_id) for name in ASPECT_TESTS[aspect]}
     result["success"] = True
     return result
 
@@ -546,10 +609,13 @@ def main() -> int:
             args.key_file,
             max_age_minutes=args.max_age_minutes,
         )
-    elif args.aspect == "bmc_sel_logs":
-        result = check_bmc_sel_logs(resolve_project(args.project))
+    elif args.aspect in HIDDEN_ASPECT_PROBE_FIELDS:
+        # BMC SEL / Redfish GPU telemetry and the physical fabric / subnet-manager
+        # / UFM / switch log planes are all provider-owned on Compute Engine, so
+        # each is emitted provider-hidden after a real project identity probe.
+        result = _check_provider_hidden_aspect(resolve_project(args.project), args.aspect)
     else:
-        result = check_bmc_gpu_telemetry(resolve_project(args.project))
+        raise ValueError(f"unsupported aspect: {args.aspect}")
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1

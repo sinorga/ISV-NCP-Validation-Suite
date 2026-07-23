@@ -18,11 +18,15 @@
 Emits the provider-neutral structured error shape:
     {"success": false, "error_type": "<bucket>", "error": "[bucket=<name>] <msg>"}
 
-``error_type`` maps each google.api_core exception (and google.auth ADC error)
-to a shared disposition bucket so callers branch on the bucket, never the raw
-exception class:
+``error_type`` maps each google.api_core exception (and google.auth ADC error,
+and the ``googleapiclient.errors.HttpError`` the Cloud Monitoring / Admin REST
+clients raise) to a shared disposition bucket so callers branch on the bucket,
+never the raw exception class:
     credentials_missing, credentials_invalid, access_denied, not_found,
     conflict, transient, api_error (uncategorized call error), unknown_error.
+An ``HttpError`` is classified from its HTTP status (401/403/404/409 and 429/5xx
+map into the same buckets as the equivalent google.api_core classes), so a REST
+call reaches identical dispositions to a gRPC/GAX call.
 The ``transient`` bucket is the retryable disposition — the retry helpers below
 (delete_with_retry / modify_iam_policy_with_retry) apply bounded backoff to it
 where the operation is safe to retry. Every emitted error string carries a
@@ -41,6 +45,11 @@ from typing import Any
 
 from google.api_core import exceptions as gax
 from google.auth import exceptions as auth_exceptions
+
+try:  # googleapiclient is only needed by domains that call a GCP REST API
+    from googleapiclient.errors import HttpError as _GoogleApiHttpError
+except ImportError:  # pragma: no cover - import guard for REST-free domains
+    _GoogleApiHttpError = None
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +74,81 @@ _TRANSIENT_CANDIDATES: tuple[type[Exception], ...] = (
 def _is_transient_exception(e: Exception) -> bool:
     """Return whether ``e`` is safe to retry under the transient budget."""
     return isinstance(e, TRANSIENT_EXCEPTIONS) or (isinstance(e, auth_exceptions.RefreshError) and e.retryable)
+
+
+# ── googleapiclient HttpError adapter ────────────────────────────────────
+# The Cloud Monitoring / Admin SDK REST calls go through
+# ``google-api-python-client`` (``googleapiclient``), whose ``.execute()`` raises
+# ``googleapiclient.errors.HttpError`` on an HTTP error response. That class is a
+# DISTINCT hierarchy from ``google.api_core.exceptions`` — the GAX isinstance
+# ladder in ``_bucket_and_detail`` never matches it, and ``TRANSIENT_EXCEPTIONS``
+# never sees it — so without this adapter a REST 403 collapses to
+# ``unknown_error`` and a REST 429/5xx bypasses the bounded transient retry. The
+# adapter reads the HTTP status (``status_code`` on newer clients, ``resp.status``
+# on older ones) and maps it into the SAME buckets the equivalent GAX class would
+# produce, so a REST call and a gRPC/GAX call reach identical dispositions.
+_HTTP_STATUS_BUCKETS: dict[int, str] = {
+    401: "credentials_invalid",  # HTTP 401 == gax.Unauthenticated
+    403: "access_denied",  # HTTP 403 == gax.PermissionDenied
+    404: "not_found",  # HTTP 404 == gax.NotFound
+    409: "conflict",  # HTTP 409 == gax.Conflict
+    429: "transient",  # HTTP 429 == gax.TooManyRequests / ResourceExhausted
+}
+
+
+def _http_error_status(e: BaseException) -> int | None:
+    """Return the HTTP status of a ``googleapiclient`` HttpError, else ``None``.
+
+    Detects the HttpError by isinstance when googleapiclient is importable, and
+    otherwise duck-types the two attributes the class exposes — ``status_code``
+    (modern clients) and ``resp.status`` (an ``httplib2`` Response on older ones)
+    — so a re-exported/wrapped HttpError still classifies. Returns ``None`` for
+    every non-HttpError: ``google.api_core`` types carry neither ``resp.status``
+    nor ``status_code`` and are handled by the GAX isinstance ladder instead.
+    """
+    is_http_error = _GoogleApiHttpError is not None and isinstance(e, _GoogleApiHttpError)
+    status_code = getattr(e, "status_code", None)
+    resp = getattr(e, "resp", None)
+    resp_status = getattr(resp, "status", None) if resp is not None else None
+    if not is_http_error and status_code is None and resp_status is None:
+        return None
+    for candidate in (status_code, resp_status):
+        if candidate is None:
+            continue
+        try:
+            return int(candidate)
+        except (TypeError, ValueError):
+            continue
+    return None
+
+
+def _bucket_for_http_status(status: int) -> str:
+    """Map an HTTP status to a disposition bucket (google.api_core parity).
+
+    401/403/404/409/429 map to their named buckets; any other 5xx is ``transient``
+    (server-side / retryable); any other 4xx is ``api_error`` (a terminal call
+    error, matching the GAX ``GoogleAPICallError`` fallback); anything else is
+    ``unknown_error``.
+    """
+    if status in _HTTP_STATUS_BUCKETS:
+        return _HTTP_STATUS_BUCKETS[status]
+    if 500 <= status <= 599:
+        return "transient"
+    if 400 <= status <= 499:
+        return "api_error"
+    return "unknown_error"
+
+
+def _is_transient_http_error(e: BaseException) -> bool:
+    """Return True iff ``e`` is an HttpError with a RETRYABLE status (429 or 5xx).
+
+    Mirrors ``TRANSIENT_EXCEPTIONS`` for the REST surface: only rate-limit (429)
+    and server-side (5xx) statuses are retried. Every other HttpError status
+    (401/403/404/409 and other 4xx) is terminal and propagates unchanged to the
+    caller's ``classify_gcp_error``.
+    """
+    status = _http_error_status(e)
+    return status is not None and (status == 429 or 500 <= status <= 599)
 
 
 # Compute Engine reports the dependency-in-use condition (a resource cannot
@@ -207,6 +291,10 @@ def _bucket_and_detail(e: Exception) -> tuple[str, str]:
         return "transient", str(e)
     if isinstance(e, gax.GoogleAPICallError):
         return "api_error", str(e)
+    http_status = _http_error_status(e)
+    if http_status is not None:
+        bucket = _bucket_for_http_status(http_status)
+        return bucket, f"GCP REST API returned HTTP {http_status}: {e}"
     return "unknown_error", str(e)
 
 
@@ -268,7 +356,7 @@ def retry_idempotent(
 ) -> Any:
     """Call an IDEMPOTENT get/list/delete/poll ``fn``, retrying transient failures.
 
-    Wraps a single provider read/list/delete/poll call and retries TWO
+    Wraps a single provider read/list/delete/poll call and retries THREE
     independent retryable classes:
 
       * The typed transient exceptions (``TRANSIENT_EXCEPTIONS`` — the
@@ -280,6 +368,13 @@ def retry_idempotent(
         poll, or delete therefore no longer aborts the run despite an idempotent
         request — the installed Compute / Cloud Logging / Resource Manager
         clients supply no default retry for their reads.
+      * A transient REST ``HttpError`` (``_is_transient_http_error`` — HTTP 429
+        or 5xx raised by ``googleapiclient``'s ``.execute()``, e.g. the Cloud
+        Monitoring ``timeSeries.list`` read). It is NOT a ``google.api_core``
+        type, so it never lands in ``TRANSIENT_EXCEPTIONS``; retried under the
+        SAME ``transient_retries`` budget and escalating backoff so a transient
+        Monitoring response no longer immediately fails the phase. Non-transient
+        HttpErrors (401/403/404/409 and other 4xx) propagate to the caller.
       * A raw transport disconnect (``is_transport_disconnect`` —
         ``RemoteDisconnected`` / urllib3 ``ProtocolError``, which is NOT a
         ``google.api_core`` type and so never lands in ``TRANSIENT_EXCEPTIONS``).
@@ -313,6 +408,27 @@ def retry_idempotent(
             )
             time.sleep(delay)
         except Exception as e:
+            # A transient REST HttpError (429 / 5xx from googleapiclient — e.g. the
+            # Cloud Monitoring timeSeries.list read) is NOT a google.api_core type,
+            # so it never lands in _TRANSIENT_CANDIDATES above. Retry it under the
+            # SAME bounded transient budget as the typed transient classes. Every
+            # non-transient HttpError (401/403/404/409 and other 4xx) fails this
+            # predicate and propagates to the caller's classify_gcp_error.
+            if _is_transient_http_error(e):
+                if transient_attempt >= transient_retries:
+                    raise
+                transient_attempt += 1
+                delay = backoff_seconds * transient_attempt
+                logger.warning(
+                    "Transient REST error during idempotent %s (retry %d/%d): %s; retrying in %.1fs",
+                    op_desc,
+                    transient_attempt,
+                    transient_retries,
+                    e,
+                    delay,
+                )
+                time.sleep(delay)
+                continue
             if transport_attempt >= retries or not is_transport_disconnect(e):
                 raise
             transport_attempt += 1
@@ -354,6 +470,7 @@ def delete_with_retry(
     resource_desc: str = "resource",
     attempts: int = 5,
     backoff_seconds: float = 2.0,
+    error_sink: list[str] | None = None,
     **kwargs: Any,
 ) -> bool:
     """Call ``fn`` with bounded retry on transient + dependency-in-use errors.
@@ -362,6 +479,13 @@ def delete_with_retry(
     already gone (NotFound counts as success — the desired terminal state
     is reached). Mirrors providers/aws/scripts/common/errors.delete_with_retry
     so callers can write provider-portable cleanup blocks.
+
+    ``error_sink`` (optional) collects the classified reason for a FAILED
+    delete. When the helper returns False it appends
+    ``"<resource_desc>: [bucket=<name>] <message>"`` so a batch-cleanup caller
+    can surface the SPECIFIC per-resource failure in its structured ``error``
+    output (a generic "one or more deletes failed" hides which resource and
+    why). No entry is appended on success or NotFound.
 
     Two retryable classes (otherwise terminal -> return False):
 
@@ -385,6 +509,17 @@ def delete_with_retry(
     safety MUST surface the bool into ``result['success']``.
     """
     last_error: Exception | None = None
+
+    def _note(err: Exception | None) -> None:
+        """Record the classified reason for a failed delete into ``error_sink``."""
+        if error_sink is None:
+            return
+        if isinstance(err, Exception):
+            _bucket, msg = classify_gcp_error(err)
+        else:
+            msg = "delete failed (no exception captured)"
+        error_sink.append(f"{resource_desc}: {msg}")
+
     for attempt in range(1, attempts + 1):
         try:
             fn(*args, **kwargs)
@@ -394,6 +529,7 @@ def delete_with_retry(
         except _TRANSIENT_CANDIDATES as e:
             if not _is_transient_exception(e):
                 logger.exception("Non-retryable credential error deleting %s", resource_desc)
+                _note(e)
                 return False
             if attempt < attempts:
                 last_error = e
@@ -409,6 +545,7 @@ def delete_with_retry(
                 time.sleep(delay)
                 continue
             logger.exception("Failed to delete %s after %d attempts", resource_desc, attempts)
+            _note(e)
             return False
         except (gax.BadRequest, gax.FailedPrecondition) as e:
             # Dependency-in-use (an HTTP 400 — gax.FailedPrecondition subclasses
@@ -431,9 +568,11 @@ def delete_with_retry(
                 time.sleep(delay)
                 continue
             logger.exception("Non-retryable bad-request deleting %s", resource_desc)
+            _note(e)
             return False
-        except gax.GoogleAPICallError:
+        except gax.GoogleAPICallError as e:
             logger.exception("Non-transient API error deleting %s", resource_desc)
+            _note(e)
             return False
         except Exception as e:
             # A raw transport disconnect (RemoteDisconnected / urllib3
@@ -469,10 +608,12 @@ def delete_with_retry(
                 time.sleep(delay)
                 continue
             logger.exception("Unexpected error deleting %s", resource_desc)
+            _note(e)
             return False
 
     if last_error is not None:
         logger.error("Exhausted retries deleting %s: %s", resource_desc, last_error)
+    _note(last_error)
     return False
 
 

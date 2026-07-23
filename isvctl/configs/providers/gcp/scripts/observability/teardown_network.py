@@ -64,8 +64,16 @@ from google.cloud import compute_v1
 _FALSY_SENTINELS = {"", "none", "null", "false"}
 
 # Per-attempt op waits, bounded so delete_with_retry does not multiply budgets.
-_TEARDOWN_INSTANCE_WAIT_S = 180
-_TEARDOWN_FIREWALL_WAIT_S = 120
+# A Compute Engine instance delete detaches and reclaims the boot disk before the
+# zonal operation reports DONE, so the op routinely runs past the earlier 180s
+# ceiling. Giving up there raised a TimeoutError and reported an in-progress
+# delete as a failed cleanup, so the wait must be long enough to observe the
+# operation reach its terminal DONE state. teardown_host normally drains the host
+# first, so this defense-in-depth delete usually hits a NotFound no-op; the wider
+# budget only matters when this step owns the drain. 300s/180s hold real margin
+# while staying under the 900s step timeout.
+_TEARDOWN_INSTANCE_WAIT_S = 300
+_TEARDOWN_FIREWALL_WAIT_S = 180
 _TEARDOWN_SUBNET_WAIT_S = 180
 _TEARDOWN_NETWORK_WAIT_S = 360
 
@@ -156,13 +164,22 @@ def main() -> int:
     firewall_ok = True
     subnets_ok = True
     network_ok = True
+    # Collects the classified per-resource reason for any FAILED cloud delete so
+    # the structured error names WHICH resource failed and WHY (a generic
+    # "one or more deletes failed" is undiagnosable from the orchestrator log).
+    cleanup_errors: list[str] = []
 
     # 1a. Primary instance dependency (zonal) — exact id in its landed zone,
     # gated on instance_created.
     if instance_created and instance_id:
         print(f"Draining host {instance_id} in {instance_zone}...", file=sys.stderr)
         instance_ok = delete_with_retry(
-            _delete_instance_op, project, instance_zone, instance_id, resource_desc=f"instance {instance_id}"
+            _delete_instance_op,
+            project,
+            instance_zone,
+            instance_id,
+            resource_desc=f"instance {instance_id}@{instance_zone}",
+            error_sink=cleanup_errors,
         )
         if instance_ok:
             result["resources_deleted"].append(f"instance:{instance_id}@{instance_zone}")
@@ -184,6 +201,7 @@ def main() -> int:
                 leak_zone,
                 instance_id,
                 resource_desc=f"instance {instance_id}@{leak_zone}",
+                error_sink=cleanup_errors,
             )
             if leak_ok:
                 result["resources_deleted"].append(f"instance:{instance_id}@{leak_zone}")
@@ -193,7 +211,9 @@ def main() -> int:
     # 2. SSH firewall (global) — exact name, gated on firewall_created.
     if firewall_created and fw_name:
         print(f"Draining firewall {fw_name}...", file=sys.stderr)
-        firewall_ok = delete_with_retry(_delete_firewall_op, project, fw_name, resource_desc=f"firewall {fw_name}")
+        firewall_ok = delete_with_retry(
+            _delete_firewall_op, project, fw_name, resource_desc=f"firewall {fw_name}", error_sink=cleanup_errors
+        )
         if firewall_ok:
             result["resources_deleted"].append(f"firewall:{fw_name}")
 
@@ -207,6 +227,7 @@ def main() -> int:
             subnet_name,
             timeout=_TEARDOWN_SUBNET_WAIT_S,
             resource_desc=f"subnetwork {subnet_name}",
+            error_sink=cleanup_errors,
         )
         if ok:
             result["resources_deleted"].append(f"subnetwork:{subnet_name}")
@@ -222,6 +243,7 @@ def main() -> int:
             network_name,
             timeout=_TEARDOWN_NETWORK_WAIT_S,
             resource_desc=f"network {network_name}",
+            error_sink=cleanup_errors,
         )
         if network_ok:
             result["resources_deleted"].append(f"network:{network_name}")
@@ -241,7 +263,9 @@ def main() -> int:
             f"Cleanup partial: instance_ok={instance_ok}, firewall_ok={firewall_ok}, "
             f"subnets_ok={subnets_ok}, network_ok={network_ok}"
         )
-        result["error"] = "One or more observability network teardown operations failed"
+        detail = "; ".join(cleanup_errors) if cleanup_errors else "no per-resource detail captured"
+        result["cleanup_errors"] = cleanup_errors
+        result["error"] = f"One or more observability network teardown operations failed: {detail}"
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1

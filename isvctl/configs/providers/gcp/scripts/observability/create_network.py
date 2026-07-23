@@ -68,7 +68,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/scripts/
 
-from common.compute import resolve_project, short_name, unique_suffix
+from common.compute import bounded_unique_name, resolve_project, short_name
 from common.errors import classify_gcp_error, delete_with_retry, handle_gcp_errors
 from common.network import (
     carve_subnet_cidrs,
@@ -102,6 +102,14 @@ def main() -> int:
     parser.add_argument("--region", required=True, help="GCP region for the regional subnetwork(s)")
     parser.add_argument("--cidr", default="10.240.0.0/16", help="Aggregate CIDR to carve the subnet range from")
     parser.add_argument("--project", default=None, help="GCP project ID (ADC fallback)")
+    parser.add_argument(
+        "--skip-destroy",
+        action="store_true",
+        help=(
+            "Preserve run-owned resources on setup failure instead of running the "
+            "compensating deletion (GCP_OBSERVABILITY_SKIP_TEARDOWN passthrough)."
+        ),
+    )
     args = parser.parse_args()
 
     project = resolve_project(args.project)
@@ -116,8 +124,15 @@ def main() -> int:
     # the run-id-scoped orphan sweep (which matches names ending in the run id)
     # still recognizes them. The full resulting names are emitted below and
     # forwarded verbatim to teardown, which never reconstructs them.
+    # bounded_unique_name keeps the composed name within Compute Engine's 63-char
+    # cap by truncating ONLY the (possibly step-isolation-lengthened) --name prefix;
+    # the discriminator, the -subnet-N role segment, and the terminal run id (which
+    # the run-id-scoped orphan sweep matches on) always survive the truncation. An
+    # over-long network/subnetwork name is otherwise rejected with HTTP 400 — e.g. a
+    # long step-isolation base like isv-observability-net-east-west-network-telemetry
+    # would push the derived subnetwork name past 63 chars.
     disc = secrets.token_hex(2)  # 4 hex chars, fresh per invocation
-    network_name = unique_suffix(f"{args.name}-{disc}")
+    network_name = bounded_unique_name(args.name, disc)
 
     result: dict[str, Any] = {
         "success": False,
@@ -209,7 +224,7 @@ def main() -> int:
         # tracks the same set so the forwarded allowlist and local cleanup can
         # never diverge.
         for idx, (cidr, zone) in enumerate(zip(subnet_cidrs, subnet_zones, strict=False)):
-            subnet_name = unique_suffix(f"{args.name}-{disc}-subnet-{idx}")
+            subnet_name = bounded_unique_name(args.name, disc, f"subnet-{idx}")
             try:
                 existing_subnet = get_subnetwork(project, args.region, subnet_name)
             except gax.NotFound:
@@ -283,24 +298,42 @@ def main() -> int:
         result.setdefault("error_type", error_type)
         result["error"] = error_msg
         result["success"] = False
-        # Partial-failure cleanup ONLY — gate strictly on the created flags so an
-        # adopted operator network / subnet is preserved. Delete dependents
-        # (subnets) before the network.
-        try:
-            for subnet_name in created_subnet_names:
-                print(f"Cleanup-on-failure: deleting subnetwork {subnet_name}", file=sys.stderr)
-                delete_with_retry(
-                    delete_subnetwork,
-                    project,
-                    args.region,
-                    subnet_name,
-                    resource_desc=f"subnetwork {subnet_name}",
-                )
-            if network_created:
-                print(f"Cleanup-on-failure: deleting network {network_name}", file=sys.stderr)
-                delete_with_retry(delete_network, project, network_name, resource_desc=f"network {network_name}")
-        except Exception as cleanup_exc:
-            print(f"Cleanup-on-failure error: {cleanup_exc}", file=sys.stderr)
+        if args.skip_destroy:
+            # Preservation mode: SUPPRESS the compensating deletion so an operator
+            # can inspect the partially created run. The exact run-owned identifiers
+            # are already in the emitted result (network_id + network_created,
+            # created_subnets); surface them explicitly so the preserved resources
+            # are unambiguous. teardown_network (also --skip-destroy) leaves them be.
+            result["skip_destroy"] = True
+            result["preserved_on_failure"] = {
+                "network_id": network_name if network_created else "",
+                "created_subnets": list(created_subnet_names),
+            }
+            print(
+                "Skip-destroy set: preserving run-owned resources on setup failure "
+                f"(network_created={network_created} network={network_name!r}, "
+                f"created_subnets={created_subnet_names})",
+                file=sys.stderr,
+            )
+        else:
+            # Partial-failure cleanup ONLY — gate strictly on the created flags so an
+            # adopted operator network / subnet is preserved. Delete dependents
+            # (subnets) before the network.
+            try:
+                for subnet_name in created_subnet_names:
+                    print(f"Cleanup-on-failure: deleting subnetwork {subnet_name}", file=sys.stderr)
+                    delete_with_retry(
+                        delete_subnetwork,
+                        project,
+                        args.region,
+                        subnet_name,
+                        resource_desc=f"subnetwork {subnet_name}",
+                    )
+                if network_created:
+                    print(f"Cleanup-on-failure: deleting network {network_name}", file=sys.stderr)
+                    delete_with_retry(delete_network, project, network_name, resource_desc=f"network {network_name}")
+            except Exception as cleanup_exc:
+                print(f"Cleanup-on-failure error: {cleanup_exc}", file=sys.stderr)
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1
