@@ -415,6 +415,17 @@ tests:
         # GKE pins guest_accelerator.count so the per-node count is known.
         K8sGpuCapacityCheck:
           expected_total: "{{ (steps.setup.kubernetes.total_gpus | default(0, true) | int) + ((steps.create_test_gpu_node_pool.expected_replicas | default(0, true) | int) * (gpu_accelerator_count | default('1', true) | int)) }}"
+        # GKE runs Cluster Autoscaler as a managed control-plane integration.
+        # Re-read the exact run-owned system pool during validation instead of
+        # fabricating an in-cluster Deployment or reusing setup's cached output.
+        K8sClusterAutoscalerCheck:
+          mode: provider_managed
+          provider_managed_command: >-
+            python3 isvctl/configs/providers/gcp/scripts/k8s/read_managed_autoscaler.py
+            --cluster-name "{{ steps.setup.cluster_name }}"
+            --node-pool "{{ steps.setup.kubernetes.autoscaler.node_pool }}"
+            --location "{{ steps.setup.location }}"
+            --project "{{ steps.setup.project }}"
     k8s_observability:
       checks:
         # GKE is a managed control plane (no control-plane pods in a namespace),

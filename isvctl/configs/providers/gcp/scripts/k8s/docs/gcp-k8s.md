@@ -243,14 +243,11 @@ Provider-specific behavior worth calling out:
   pool (bounded min/max, read back and verified live) and emits provider-native
   evidence (`provider=managed`, node_pool, min/max) into the setup inventory. GKE
   runs the autoscaler in its managed control plane, so there is no in-cluster
-  `cluster-autoscaler` Deployment. The released `K8sClusterAutoscalerCheck` remains
-  **Deployment-only** — it discovers only an in-cluster autoscaler Deployment and
-  has no provider-managed evidence mode — so on GKE it **structured-skips**
-  (`require_autoscaler` is false; nothing binds setup's managed readback as its
-  `step_output`). Setup's independent live enable/min/max verification is the real
-  coverage today; the released validator does not yet record autoscaler coverage
-  here. This enablement stays visible until the upstream validator learns to accept
-  a provider-native GKE/API signal, at which point the binding can require the check.
+  `cluster-autoscaler` Deployment. `K8sClusterAutoscalerCheck` now uses its
+  provider-managed mode: it runs a separate GKE node-pool readback during
+  validation and requires enabled state with coherent min/max bounds. Setup still
+  verifies and records the same state as a lifecycle gate, but validator evidence
+  comes from its independent live read rather than cached setup output.
 - **CSI block storage:** setup discovers a live `pd.csi.storage.gke.io` block
   `StorageClass`, so the block-storage checks (types / quota / dynamic
   provisioning) run against a real class without an explicit `K8S_CSI_*` override.
@@ -339,6 +336,12 @@ GCP_K8S_SKIP_TEARDOWN=false RUN_ID=<original-run-id> uv run isvctl test run \
   refuses to provision GPU compute under an unscoped name teardown can't reclaim.
 - **No GPU capacity in any candidate zone** — L4 capacity is zone-fragmented;
   widen `GCP_K8S_GPU_ZONES` or retry later. The error names the zones tried.
+- **GKE stockout after a successful capacity probe** — setup reads the latest
+  exact node-pool create operation, classifies an explicit `GCE_STOCKOUT` as
+  transient, reconciles the partial run-owned cluster, and probes the remaining
+  `GCP_K8S_GPU_ZONES` in order. Non-stockout apply failures still fail closed,
+  and setup returns a transient failure only after no configured candidates
+  remain.
 - **`RuntimeClass "nvidia" not found`** — setup creates the passthrough
   RuntimeClass; ensure setup completed before the test phase.
 - **Control-plane logs empty** — `K8sControlPlaneLogsCheck` reads Cloud Logging;

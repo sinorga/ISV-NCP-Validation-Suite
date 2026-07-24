@@ -14,8 +14,8 @@
         "isv_commit": "7042c2deafe769e83206906545629152d09f53a6"
       },
       "k8s": {
-        "factory_commit": "caedca6e13051bfa375dcbcd6df18cd976e5d549",
-        "isv_commit": "7042c2deafe769e83206906545629152d09f53a6"
+        "factory_commit": "28176a5f0ce8a9f2d93f3399d6363504182adc84",
+        "isv_commit": "43573ac65da3e175b74b9067ca97cc4dd66b446b"
       },
       "network": {
         "factory_commit": "c7ace2d3fd207d5563c0a97ad32e128a8203d5a0",

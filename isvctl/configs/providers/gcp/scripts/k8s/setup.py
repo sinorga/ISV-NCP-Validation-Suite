@@ -452,14 +452,17 @@ def main() -> int:
             # run-owned, clean when confirmed-absent, fail-visibly on unreadable /
             # mismatched ownership) BEFORE re-raising, so a partially-created cluster
             # can never escape cleanup with no durable state entry.
-            k8s.apply_cluster_with_recovery(
+            gpu_zone = k8s.apply_cluster_with_gpu_zone_fallback(
                 k8s.CLUSTER_TF_DIR,
                 state_file,
                 "google_container_cluster.primary",
                 cluster_name,
                 args.location,
                 project,
+                gpu_pool_name,
                 tf_vars,
+                candidates,
+                gpu_zone,
                 apply_timeout=_APPLY_TIMEOUT,
                 reconcile_destroy_timeout=_RECONCILE_DESTROY_TIMEOUT,
             )

@@ -42,6 +42,8 @@ import secrets
 import subprocess
 import sys
 import time
+from collections.abc import Callable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
@@ -2216,6 +2218,7 @@ def apply_cluster_with_recovery(
     *,
     apply_timeout: int,
     reconcile_destroy_timeout: int,
+    failure_diagnostic: Callable[[], str] | None = None,
 ) -> None:
     """``terraform_apply`` a cluster module, reconciling an AMBIGUOUS create on failure.
 
@@ -2226,10 +2229,12 @@ def apply_cluster_with_recovery(
     waited to confirmed absence; unreadable/mismatched ownership fails visibly) BEFORE
     re-raising, so a partially-created cluster can never escape cleanup with no durable
     state entry. The original apply diagnostic stays the reported failure unless the
-    reconcile surfaces a more serious ownership/cleanup anomaly."""
+    optional provider diagnostic supplies a more specific bucket, or reconciliation
+    surfaces a more serious ownership/cleanup anomaly."""
     try:
         terraform_apply(module_dir, state_file, tf_vars, timeout=apply_timeout)
     except LifecycleError as apply_exc:
+        diagnosed_exc = _with_provider_failure_diagnostic(apply_exc, failure_diagnostic)
         try:
             outcome = reconcile_orphaned_cluster(
                 module_dir,
@@ -2245,13 +2250,159 @@ def apply_cluster_with_recovery(
             raise LifecycleError(
                 reconcile_exc.bucket,
                 f"{reconcile_exc.detail} (surfaced while reconciling an ambiguous cluster create "
-                f"after apply failed: {apply_exc.detail})",
+                f"after apply failed: {diagnosed_exc.detail})",
             ) from apply_exc
         log(
             f"note: reconciled ambiguous cluster create after apply failure — exact cluster "
             f"{cluster_name} was {outcome}; re-raising the original apply failure."
         )
-        raise
+        raise diagnosed_exc from apply_exc
+
+
+def _with_provider_failure_diagnostic(
+    apply_exc: LifecycleError,
+    failure_diagnostic: Callable[[], str] | None,
+) -> LifecycleError:
+    """Attach a best-effort provider operation diagnostic without masking apply failure."""
+    if failure_diagnostic is None:
+        return apply_exc
+    try:
+        diagnostic = failure_diagnostic()
+    except Exception as exc:  # diagnostic failure must never replace the cleanup-capable apply error
+        log(f"note: provider failure diagnostic could not be collected: {exc}")
+        return apply_exc
+    if not diagnostic.strip():
+        return apply_exc
+
+    bucket = _classify_cli_output(diagnostic)
+    if bucket == "unknown_error":
+        bucket = apply_exc.bucket
+    detail = apply_exc.detail
+    if detail.startswith("[bucket=") and "] " in detail:
+        detail = f"[bucket={bucket}] {detail.split('] ', 1)[1]}"
+    return LifecycleError(
+        bucket,
+        f"{detail} Provider operation diagnostic: {fold_tail(diagnostic)}",
+    )
+
+
+def latest_node_pool_create_operation_diagnostic(
+    cluster_name: str,
+    pool_name: str,
+    project: str,
+    started_after: str,
+    *,
+    timeout: int = 120,
+) -> str:
+    """Return this attempt's latest exact GKE node-pool CREATE operation."""
+    target = f"{cluster_name}/nodePools/{pool_name}"
+    rc, out = gcloud(
+        [
+            "container",
+            "operations",
+            "list",
+            "--project",
+            project,
+            "--filter",
+            f"targetLink:{target} AND operationType=CREATE_NODE_POOL AND startTime>={started_after}",
+            "--sort-by=~startTime",
+            "--limit=1",
+            "--format=json",
+        ],
+        timeout=timeout,
+    )
+    if rc != 0:
+        log(
+            f"note: could not read the latest CREATE_NODE_POOL operation for "
+            f"{pool_name} on {cluster_name}: {fold_tail(out)}"
+        )
+        return ""
+    return out
+
+
+def is_gpu_stockout_failure(exc: LifecycleError) -> bool:
+    """True only when provider evidence explicitly identifies a GPU stockout."""
+    return exc.bucket == "transient" and _output_has_stockout(exc.detail)
+
+
+def apply_cluster_with_gpu_zone_fallback(
+    module_dir: Path,
+    state_file: str,
+    address: str,
+    cluster_name: str,
+    location: str,
+    project: str,
+    gpu_pool_name: str,
+    tf_vars: dict[str, Any],
+    candidate_zones: list[str],
+    selected_zone: str,
+    *,
+    apply_timeout: int,
+    reconcile_destroy_timeout: int,
+) -> str:
+    """Apply a fresh cluster, retrying later candidate zones on proven GKE stockout.
+
+    The capacity preflight and the real GKE node-pool operation are separated by
+    cluster provisioning, so capacity can disappear after a zone was selected.
+    Every failed apply is fully reconciled by ``apply_cluster_with_recovery``
+    before another candidate is probed; non-stockout failures still fail closed.
+    """
+    try:
+        selected_index = candidate_zones.index(selected_zone)
+    except ValueError as exc:
+        raise LifecycleError(
+            "config_error",
+            f"[bucket=config_error] selected GPU zone {selected_zone!r} is not in "
+            f"the configured candidate list {candidate_zones}.",
+        ) from exc
+    remaining_zones = candidate_zones[selected_index + 1 :]
+
+    while True:
+        attempt_started_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+        try:
+            apply_cluster_with_recovery(
+                module_dir,
+                state_file,
+                address,
+                cluster_name,
+                location,
+                project,
+                tf_vars,
+                apply_timeout=apply_timeout,
+                reconcile_destroy_timeout=reconcile_destroy_timeout,
+                failure_diagnostic=lambda: latest_node_pool_create_operation_diagnostic(
+                    cluster_name,
+                    gpu_pool_name,
+                    project,
+                    attempt_started_at,
+                ),
+            )
+            return selected_zone
+        except LifecycleError as apply_exc:
+            if not is_gpu_stockout_failure(apply_exc):
+                raise
+            if not remaining_zones:
+                raise LifecycleError(
+                    "transient",
+                    f"{apply_exc.detail} No configured GPU candidate zones remain after "
+                    f"the real GKE node-pool stockout; candidates={candidate_zones}.",
+                ) from apply_exc
+
+            log(
+                f"note: GKE reported a post-preflight GPU stockout in {selected_zone}; "
+                f"the partial cluster was reconciled, trying remaining zones {remaining_zones}."
+            )
+            selected_zone = select_gpu_zone(
+                project,
+                remaining_zones,
+                str(tf_vars["gpu_machine_type"]),
+                str(tf_vars["gpu_accelerator_type"]),
+                int(tf_vars["gpu_accelerator_count"]),
+                network=str(tf_vars["network"]),
+            )
+            selected_index = remaining_zones.index(selected_zone)
+            remaining_zones = remaining_zones[selected_index + 1 :]
+            tf_vars["gpu_node_locations"] = [selected_zone]
 
 
 def apply_node_pool_with_recovery(
@@ -2594,6 +2745,23 @@ def verify_system_autoscaling(
         "enabled": True,
         "min_nodes": expected_min,
         "max_nodes": expected_max,
+    }
+
+
+def read_managed_autoscaler_evidence(
+    cluster_name: str,
+    pool_name: str,
+    location: str,
+    project: str,
+) -> dict[str, Any]:
+    """Read the current GKE system-pool autoscaling state as validator evidence."""
+    live = _read_node_pool_autoscaling(cluster_name, pool_name, location, project)
+    return {
+        "provider": "managed",
+        "node_pool": pool_name,
+        "enabled": live["enabled"],
+        "min_nodes": live["min"],
+        "max_nodes": live["max"],
     }
 
 
@@ -4023,12 +4191,9 @@ def gather_inventory(
         # point the Deployment-shaped probe at a nonexistent object). Instead emit
         # PROVIDER-NATIVE autoscaler evidence (provider=managed, node_pool, enabled,
         # min/max) read back + verified live off the system node pool by setup. The
-        # released K8sClusterAutoscalerCheck stays Deployment-only (no provider-managed
-        # mode), so on GKE it STRUCTURED-SKIPS: nothing binds this evidence as its
-        # step_output and require_autoscaler is false. This field is emitted so setup's
-        # own live enable/min/max verification is recorded, and so a future validator
-        # that accepts a provider-native signal can consume it — it is NOT consumed by
-        # the released check today.
+        # K8sClusterAutoscalerCheck's provider-managed mode independently re-reads
+        # this exact pool during validation. Preserve the setup observation for the
+        # run inventory, but do not use it as a substitute for the validator readback.
         "autoscaler": autoscaler or {},
         # Outside-vantage API-ACL probe, already RENDERED against this run's
         # resolved api_endpoint by setup (from --unauthorized-probe-template).
