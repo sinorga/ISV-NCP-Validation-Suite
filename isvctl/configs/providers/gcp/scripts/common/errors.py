@@ -55,14 +55,22 @@ logger = logging.getLogger(__name__)
 
 ALREADY_GONE_EXCEPTIONS: tuple[type[Exception], ...] = (gax.NotFound,)
 
+# The complete retryable google.api_core family, written out in full rather
+# than left implicit in the base classes. `DeadlineExceeded` subclasses
+# `GatewayTimeout` and `ResourceExhausted` subclasses `TooManyRequests`, so
+# naming all four is redundant to `isinstance` — but this tuple is read as the
+# definition of "transient" by anyone auditing retry and cleanup-ownership
+# behavior, and an unnamed class reads as an uncovered one. It matches the
+# `transient` bucket membership in `_bucket_and_detail` below exactly.
 TRANSIENT_EXCEPTIONS: tuple[type[Exception], ...] = (
-    gax.ServiceUnavailable,
-    gax.InternalServerError,
-    gax.GatewayTimeout,
-    gax.DeadlineExceeded,
-    gax.TooManyRequests,
-    gax.Aborted,
-    gax.RetryError,
+    gax.ServiceUnavailable,  # HTTP 503
+    gax.InternalServerError,  # HTTP 500
+    gax.GatewayTimeout,  # HTTP 504
+    gax.DeadlineExceeded,  # HTTP 504 (GatewayTimeout subclass)
+    gax.TooManyRequests,  # HTTP 429
+    gax.ResourceExhausted,  # HTTP 429 (TooManyRequests subclass)
+    gax.Aborted,  # HTTP 409 concurrent-mutation (Conflict subclass)
+    gax.RetryError,  # inner retry budget exhausted on a transient
 )
 
 _TRANSIENT_CANDIDATES: tuple[type[Exception], ...] = (

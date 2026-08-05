@@ -53,7 +53,7 @@ from common.compute import (
     narrow_region_to_zone,
     resolve_project,
 )
-from common.errors import handle_gcp_errors
+from common.errors import classify_gcp_error, handle_gcp_errors
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
@@ -105,10 +105,14 @@ def main() -> int:
                 result["console_available"] = True
                 result["output_snippet"] = contents[-500:] if len(contents) > 500 else contents
         except (gax.PermissionDenied, gax.Unauthenticated) as e:
+            bucket, detail = classify_gcp_error(e)
             result["serial_access_enabled"] = False
-            result["error"] = f"Serial console access denied: {e}"
+            result["error_type"] = bucket
+            result["error"] = detail
         except gax.NotFound as e:
-            result["error"] = f"Instance not found: {e}"
+            bucket, detail = classify_gcp_error(e)
+            result["error_type"] = bucket
+            result["error"] = detail
 
         # Per the AWS oracle: step succeeds only when at least one probe
         # returned a usable result. A denied probe with no readable output
@@ -116,7 +120,9 @@ def main() -> int:
         result["success"] = bool(result["console_available"] or result["serial_access_enabled"])
 
     except Exception as e:
-        result["error"] = str(e)
+        bucket, detail = classify_gcp_error(e)
+        result["error_type"] = bucket
+        result["error"] = detail
 
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["success"] else 1
