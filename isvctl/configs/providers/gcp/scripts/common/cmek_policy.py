@@ -56,7 +56,7 @@ def _write_policy(client: kms_v1.KeyManagementServiceClient, key_name: str, poli
 
 
 def _clone_binding(binding: Any) -> Any:
-    """Clone a live protobuf binding or an intent-harness message double."""
+    """Clone a live protobuf binding or a stand-in message double used in tests."""
     clone = policy_pb2.Binding()
     copy_from = getattr(clone, "CopyFrom", None)
     if callable(copy_from):
@@ -66,7 +66,7 @@ def _clone_binding(binding: Any) -> Any:
 
 
 def _replace_repeated(owner: Any, field: str, values: list[Any]) -> None:
-    """Replace a repeated field on protobufs and intent-harness message doubles."""
+    """Replace a repeated field on protobufs and stand-in message doubles."""
     clear_field = getattr(owner, "ClearField", None)
     if callable(clear_field):
         clear_field(field)

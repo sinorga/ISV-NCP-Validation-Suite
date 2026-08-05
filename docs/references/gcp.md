@@ -89,7 +89,7 @@ This image is published by Google, ships with the NVIDIA driver + CUDA toolkit, 
     export GCP_VM_IMAGE_PROJECT=<your-gcp-project>
     ```
 
-    The provider config reads both env vars via Jinja and falls back to the public DLVM when either is unset. For one-off runs you can also override per-invocation:
+    The provider config reads both env vars via Jinja. Set them **together**: an image project is authoritative once supplied, so it never falls back to the public DLVM (see the resolution table below). For one-off runs you can also override per-invocation:
 
     ```bash
     uv run isvctl test run -f isvctl/configs/providers/gcp/config/vm.yaml \
@@ -97,7 +97,17 @@ This image is published by Google, ships with the NVIDIA driver + CUDA toolkit, 
         --set image=<your-image-family-or-name>
     ```
 
-    Either path wires `image_project` and `image` through to `launch_instance`'s `--image-project` / `--ami-id` arguments. The image short-name resolves in the operator project first; if not found there, the resolver falls back to the default DLVM project.
+    Either path wires `image_project` and `image` through to `launch_instance`'s `--image-project` / `--ami-id` arguments. The resolver treats an explicitly supplied project as authoritative — it is never silently replaced by the vendor default — so the three cases behave differently:
+
+    | `GCP_VM_IMAGE` (`image`) | `GCP_VM_IMAGE_PROJECT` (`image_project`) | Where the image is looked up |
+    |---|---|---|
+    | unset | unset | Image family `common-cu129-ubuntu-2204-nvidia-580` in `deeplearning-platform-release` (the public DLVM default). |
+    | short name or family alias | unset | Your ADC project first (the same account-scoped meaning `--ami-id` has on AWS). Only if it is **not found** there does the resolver retry the same name in `deeplearning-platform-release`; a miss in both fails the launch. |
+    | any | set | The named project only. A short name that is absent there fails the launch with `Image '<name>' not found in project '<project>'` — there is **no** fallback to your ADC project or to the DLVM project. |
+
+    With `GCP_VM_IMAGE_PROJECT` set and `GCP_VM_IMAGE` unset, the lookup is the *default DLVM family name* inside your project, which almost always fails — set both variables, or neither.
+
+    A full image path (`projects/<project>/global/images/<name>` or an `https://` self link) in `GCP_VM_IMAGE` is passed to Compute Engine verbatim and ignores `GCP_VM_IMAGE_PROJECT`.
 
 2. **Skip NIM** by leaving `NGC_API_KEY` unset (see §4 above). The `deploy_nim` and `teardown_nim` steps short-circuit cleanly and every instance-lifecycle step proceeds. The run still reports `[FAIL] TEST` because of `ContainerRuntimeCheck` (see note below) — accept that as a documented limitation of the default image.
 
@@ -127,6 +137,36 @@ cloud runner, its NAT egress range). The VM, network, and image-registry launch
 firewalls set their `sourceRanges` to the normalized list, and a pre-existing
 rule that allows `0.0.0.0/0` on tcp/22 is not eligible for verified-reuse.
 
+### 7. Outbound serial-console gateway egress (VM domain)
+
+The VM `component_key_access` step proves AUTH03 by completing a real publickey
+handshake to the Compute Engine **interactive serial-console gateway** for the
+instance's own region, `<REGION>-ssh-serialport.googleapis.com` on **tcp/9600**
+(for example `us-central1-ssh-serialport.googleapis.com:9600`). Retrieving
+serial output through `instances.getSerialPortOutput` is authorized by the
+caller's IAM credentials and proves nothing about the specified SSH key, so it
+is not accepted as substitute evidence.
+
+The host running the suite therefore needs **outbound TCP 9600** to that
+regional gateway name. If it does not have it, the capability still exists in
+the project and only the local environment cannot reach it, so the step reports
+a `configuration_error` naming the egress to open rather than passing or
+skipping. Two distinct outcomes are *not* this case:
+
+- the `compute.disableSerialPortAccess` org policy removes the capability from
+  the project and structured-skips the step on its own (see
+  [Org-policy considerations](#org-policy-considerations)); and
+- a gateway that answers and then rejects the key is a real failure — never a
+  skip.
+
+There is no waiver. `ComponentKeyAccessCheck` must pass for the run to be
+admitted, and this handshake is the only evidence for the property it checks, so
+an environment override that turned unopened egress into a skip would report a
+green run whose AUTH03 evidence was never collected — a skipped validation
+counts as passed. On an air-gapped or strictly egress-filtered runner, open
+tcp/9600 to the regional gateway (or run the suite from a host that can), rather
+than looking for a flag to silence the step.
+
 ## Operator environment variables
 
 The GCP suite reads these operator environment variables. Set the required ones
@@ -137,6 +177,14 @@ before a `live` run — live mode is rejected when a required var is unset.
 | `NETWORK_FIREWALL_TRUST_IP` | **Required** (vm, network, image-registry, observability) | none — fail closed (no fallback) | Trusted IPv4 source range(s) for SSH (tcp/22) and RDP (tcp/3389) firewall ingress. A bare IPv4 normalizes to `/32`; comma-separated IPv4 CIDRs are allowed. The suite never opens these admin ports from `0.0.0.0/0`: when this var is unset, empty, non-IPv4, or `0.0.0.0/0`, the affected step emits an operator error, sets `success=false`, and exits non-zero. The image-registry `launch_instance` and observability `launch_host` steps consume it the same way as the vm / network launch firewalls. |
 | `GCP_VM_IMAGE` | Optional (vm) | public DLVM family `common-cu129-ubuntu-2204-nvidia-580` | Operator image short-name or self-link for `launch_instance` (flows to `--ami-id`); resolves as exact-name, then family alias, under the image project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
 | `GCP_VM_IMAGE_PROJECT` | Optional (vm) | `deeplearning-platform-release` | Project hosting the operator image (flows to `--image-project`). When unset (and `GCP_VM_IMAGE` is also unset) the stub falls back to the public DLVM project. See [§5](#5-gpu-image-and-docker-requirement-for-deploy_nim). |
+| `GCP_VM_INSTANCE_ID` | Optional (vm) | unset — `launch_instance` provisions a new run-scoped instance | Name of an existing long-lived Compute Engine instance that `launch_instance` **adopts** instead of provisioning one (the GCP counterpart of the AWS provider's `AWS_VM_INSTANCE_ID`; the iterate-against-a-warm-VM workflow). It takes effect **only when `GCP_VM_KEY_FILE` is also set** — either one alone is ignored and the normal create path runs. The instance is looked up in the zone resolved from the step's `--zone` / `--region`, so it must live there; a canonically stopped instance is started (and waited to `running`) first. Verified-reuse ownership: `instance_created`, `firewall_created`, and `key_created` all stay `false`, so teardown preserves the adopted VM, any pre-existing SSH firewall rule, and the operator key rather than deleting resources this run did not create. |
+| `GCP_VM_KEY_FILE` | Optional (vm) | unset — `launch_instance` generates a run-scoped local key pair under `/tmp` | Path to the existing **private** SSH key used to reach the adopted `GCP_VM_INSTANCE_ID` VM (set both or neither). Adoption never injects this key: `launch_instance` derives its public half and reads back the instance's `ssh-keys` metadata, so if that key is not already published on the VM the `specified_key` subtest reports not-confirmed and `instance_key_name` stays null — which the AUTH03 `component_key_access` step then consumes as "no verified key identity" and fails honestly instead of substituting the requested label. The key is operator-owned (`key_created=false`), so teardown never deletes it. |
+| `GCP_SELF_PROVISION_RBAC` | Optional (vm) | `1` — `console_rbac` self-provisions its probe identities | Set to `0`, `false`, or `no` to forbid `console_rbac` from creating the temporary probe service accounts, IAM bindings, and second probe VM it normally uses to prove serial-console RBAC. With self-provisioning disabled **and no pre-provisioned trio supplied**, the step returns a clean policy skip (`success=true`, `skipped=true`, `mode=skipped`) — all three RBAC subtests are then unproven for that run, so this is a coverage-losing opt-out, not a pass. The pre-provisioned trio below is evaluated **first**, so supplying it keeps the check substantive even with this set to `0`. Leave it unset where the run credential may mutate IAM: the default path fails honestly if a grant is denied instead of skipping. |
+| `GCP_DENIED_PRINCIPAL_SA` | Optional (vm) | unset — `console_rbac` self-provisions the denied principal | Email of a pre-created service account that must **not** hold `compute.instances.getSerialPortOutput` on the target VM. The pre-provisioned fallback path (for projects that forbid IAM mutation) activates only when this, `GCP_ALLOWED_PRINCIPAL_SA`, **and** `GCP_OTHER_INSTANCE_ID` are all set; a partial set is ignored and the self-provisioned path runs. The run credential must hold `roles/iam.serviceAccountTokenCreator` on it, because the probe mints a short-lived token and calls `instances.getSerialPortOutput` as that principal, requiring HTTP 403. |
+| `GCP_ALLOWED_PRINCIPAL_SA` | Optional (vm) | unset — `console_rbac` self-provisions the allowed principal | Email of a pre-created service account granted serial-output read (`roles/compute.viewer` or an equivalent minimal role) **scoped to the target VM only**. Part of the pre-provisioned trio above; the run credential also needs `roles/iam.serviceAccountTokenCreator` on it. The probe requires HTTP 200 against the target VM and HTTP 403 against `GCP_OTHER_INSTANCE_ID`, so a project-level grant fails the resource-scoping subtest. |
+| `GCP_OTHER_INSTANCE_ID` | Optional (vm) | unset — `console_rbac` self-provisions a second probe VM | Name of a **real, existing** second instance that `GCP_ALLOWED_PRINCIPAL_SA` has NOT been granted access to; completes the pre-provisioned trio. The resource-scoping subtest passes only on HTTP 403 — a missing instance returns 404, which is treated as a failure rather than as proof of scoping, so this must name a live VM. |
+| `GCP_OTHER_INSTANCE_ZONE` | Optional (vm) | unset — the target instance's zone | Zone of `GCP_OTHER_INSTANCE_ID` when that second probe VM lives in a different zone than the target VM. Consulted only on the pre-provisioned `console_rbac` path. |
+| `GCP_VM_SKIP_TEARDOWN` | Optional (vm) | unset — teardown runs | When `true`, the VM `teardown` step returns success without deleting the run-created resources (instance, SSH firewall rule, local SSH key pair, and any capacity-walk leaked-zone records); forwarded as `--skip-destroy` via the `teardown_flag` setting. The same `--skip-destroy` also reaches **every other VM step that can delete a fixture it owns**, because those in-step cleanups run long before terminal teardown: in `launch_instance` it suppresses the **setup-failure** compensating deletion of the accepted instance, SSH firewall rule, and local key (the zone-walk phantom reclamation stays ungated — an abandoned capacity-walk record is a billable phantom, not a debugging fixture), and in `console_rbac` it suppresses that step's `finally` cleanup of the two temporary probe service accounts, the disposable probe VM, and the two IAM bindings. Preservation suppresses the delete, never the ownership bookkeeping: both steps still emit their exact identities and ownership flags (`launch_instance` adds `preserved_on_failure`, `console_rbac` adds `preserved_fixtures` carrying its per-invocation ownership marker), and neither ever cleans up *partially* — a half-deleted fixture set no longer reproduces the failure. Reclaim retained `console_rbac` fixtures later with `python3 isvctl/configs/providers/gcp/scripts/vm/console_rbac.py --reclaim-preserved <console_rbac.json>` (`-` reads the payload from stdin), which re-verifies the ownership marker on each recorded identity before deleting, removes both IAM bindings by their recorded role + member, treats an already-absent resource as idempotent success, and fails closed (keeping the handoff) when a readback is denied. Unset or any other value runs the normal ownership-gated teardown. Use it to keep a failed VM run's instance alive for debugging, and **save that run's `launch_instance` step output to a JSON file** — that payload is the required ownership and zone-scope record: it is the only place the three ownership bits (`instance_created`, `firewall_created`, `key_created`) and every `leaked_zones` entry the multi-zone capacity walk touched are written down. Reclaim the resources later by replaying it through the same stub: `python3 isvctl/configs/providers/gcp/scripts/vm/teardown.py --from-launch-output <launch_instance.json> --delete-security-group --delete-key-pair` (`-` reads the payload from stdin; explicit flags still win over the payload). The replay reapplies every ownership gate — so a run that ADOPTED an operator-supplied long-lived VM, firewall rule, or private key preserves it instead of destroying it — and deletes the instance in the primary zone **and** in each leaked zone, so no phantom instance keeps billing in a zone the step output never names; `NotFound` is idempotent success, so re-running after a partial cleanup is safe. Do **not** hand-write `gcloud compute instances delete` / `gcloud compute firewall-rules delete` / `rm -f <key_file>` cleanup: those commands can read none of the ownership bits and only ever name one zone. A bare standalone `--phase teardown` also will **not** work here: `launch_instance` never ran in that process, so `--instance-id` / `--instance-created` arrive empty and teardown correctly refuses to delete a VM it cannot prove it created, reporting success with an empty `deleted` list while the GPU instance keeps billing — `--from-launch-output` is what supplies that missing provenance. |
 | `GCP_IAM_SKIP_TEARDOWN` | Optional (iam) | unset — teardown runs | When `true`, the IAM `teardown` step returns success without deleting the service account it created; clean it up later with the self-contained `delete_user.py --username <username-from-create_user-output>` command (a standalone `--phase teardown` cannot resolve the per-run service-account name because `create_user` did not run in that process). See [IAM domain](#iam-domain-service-accounts). |
 | `GCP_IMAGE_REGISTRY_SKIP_TEARDOWN` | Optional (image-registry) | unset — teardown runs | When `true`, the image-registry `teardown` step returns success without deleting the in-test resources (imported image, staging bucket + disk objects, instance, SSH firewall rule, local SSH key); forwarded as `--skip-destroy`. The GCP-namespaced override of the suite's vendor-neutral `IR_SKIP_TEARDOWN`. See the [Image Registry guide](../../isvctl/configs/providers/gcp/scripts/image-registry/docs/gcp-image-registry.md). |
 | `EDGE_ENDPOINTS` | Optional (security) | unset — `InsecureProtocolsCheck` structured-skips | Comma-joined `host:port` HTTPS endpoints the provider-neutral raw-socket prober checks for plain-HTTP / legacy-TLS refusal. Every endpoint must also complete a modern TLS 1.2+ handshake; a closed, timed-out, or unreachable port fails rather than masquerading as secure protocol policy. See [Security domain](#security-domain). |

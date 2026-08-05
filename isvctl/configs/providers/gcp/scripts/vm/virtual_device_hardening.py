@@ -17,21 +17,42 @@
 """Validate Compute Engine VM virtual-device hardening evidence.
 
 Compute Engine does not expose customer-facing USB redirection or
-shared-clipboard controls for tenant VMs (equivalent posture to EC2 —
-attached devices are persistent disks, NICs, and local SSD when
-configured). This script records that provider evidence and, when SSH
-details are available, adds conservative guest-side probes for USB
-controllers/devices, clipboard agents, and desktop-style virtual
-peripherals.
+shared-clipboard controls for tenant VMs (equivalent posture to EC2 for
+USB and clipboard specifically). Its customer-attachable device surface
+is persistent disks, NICs, local SSD when configured, guest accelerators,
+and the virtual display device. This script records that provider
+evidence and, when SSH details are available, adds conservative
+guest-side probes for USB controllers/devices, clipboard agents, and
+desktop-style virtual peripherals.
 
 The PROBE_SENTINEL framing + pattern tuples + REQUIRED_TESTS list are
 reused verbatim from the AWS oracle because the probes are Linux-level
-guest commands with no cloud-vendor surface. Only the provider-evidence
-preamble names Compute Engine (not EC2).
+guest commands with no cloud-vendor surface.
+
+Divergence from the AWS oracle (the oracle's provider preamble is a
+constant string): the provider-evidence half is DERIVED here from a
+zonal ``instances.get`` readback of the launched VM, so the attached
+device inventory this step reports is the instance's actual device
+inventory rather than an assumption. ``--region`` is narrowed to the
+effective zone for that zonal call. An attached device outside the
+documented Compute Engine device categories fails
+``unnecessary_virtual_devices_absent``; an unreadable instance fails the
+step rather than silently downgrading to the constant preamble.
+
+Second divergence with no EC2 analog: Compute Engine exposes a
+customer-toggled virtual display (``Instance.display_device.enable_display``,
+set via ``instances.updateDisplayDevice``). It is a real attachable
+peripheral that a disk/NIC/accelerator inventory cannot see, and it can be
+enabled at the API level on a guest that shows no qxl/spice/vmware
+signature, so the guest-side probes do not cover it either. The same
+``instances.get`` readback therefore reads ``display_device.enable_display``
+on every run: enabled fails ``unnecessary_virtual_devices_absent``, and
+disabled/absent is recorded as inspected-and-clear so a checked-clear
+result stays distinguishable from an uninspected one.
 
 Usage:
     python3 virtual_device_hardening.py --instance-id <name> \
-        --region <region> --public-ip <ip> --key-file <path>
+        --region <region> --zone <zone> --public-ip <ip> --key-file <path>
 """
 
 from __future__ import annotations
@@ -44,7 +65,13 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/scripts/
 
-from common.errors import handle_gcp_errors
+from common.compute import (
+    get_instance,
+    narrow_region_to_zone,
+    resolve_project,
+    short_name,
+)
+from common.errors import classify_gcp_error, handle_gcp_errors
 from common.ssh_utils import ssh_run
 
 CLIPBOARD_PATTERNS = (
@@ -104,6 +131,36 @@ SIGNAL_BINDINGS: tuple[tuple[str, str, str], ...] = (
         "unnecessary_virtual_devices_absent",
         "Unnecessary virtual device signals detected",
     ),
+)
+
+# The device categories Compute Engine can attach to a tenant VM: persistent
+# disks, local SSD (SCRATCH disks), network interfaces, guest accelerators,
+# and the customer-toggled virtual display. There is no USB, floppy, CD-ROM,
+# sound, tablet, or clipboard-channel attachment surface in the instances
+# API, so any category outside the allowed set is an unnecessary virtual
+# device. The virtual display is inspected on every run but is deliberately
+# NOT allowed: an enabled display is an unnecessary desktop peripheral by the
+# same standard the guest-side qxl/spice/tablet patterns apply, and it is
+# invisible to both the disk/NIC/accelerator inventory and the guest probes.
+# https://cloud.google.com/compute/docs/reference/rest/v1/instances/get
+# https://cloud.google.com/compute/docs/reference/rest/v1/instances/updateDisplayDevice
+ALLOWED_DEVICE_CATEGORIES: frozenset[str] = frozenset(
+    {"persistent_disk", "local_ssd", "network_interface", "guest_accelerator"}
+)
+VIRTUAL_DISPLAY_CATEGORY = "virtual_display"
+INSPECTED_DEVICE_CATEGORIES: tuple[str, ...] = (
+    "persistent_disk",
+    "local_ssd",
+    "network_interface",
+    "guest_accelerator",
+    VIRTUAL_DISPLAY_CATEGORY,
+)
+
+PROVIDER_EVIDENCE_NOTE = (
+    "Compute Engine exposes no tenant-facing USB redirection or shared clipboard "
+    "control for VM instances; attachable devices are persistent disks, local SSD, "
+    "network interfaces, guest accelerators, and the customer-toggled virtual "
+    "display (display_device.enable_display), all inspected via instances.get."
 )
 
 
@@ -234,12 +291,92 @@ def _collect_guest_probe(host: str, user: str, key_file: str, timeout: int) -> d
     }
 
 
+def _virtual_display_enabled(instance: Any) -> bool:
+    """Return the observed ``display_device.enable_display`` state.
+
+    ``display_device`` is a message field: the API omits it entirely when
+    the virtual display was never enabled, and proto-plus then yields a
+    default ``DisplayDevice`` whose ``enable_display`` is ``False``. Both
+    the omitted and the explicitly-false shape therefore read as ``False``
+    (display off), and only an explicit ``true`` reads as enabled.
+    """
+    display_device = getattr(instance, "display_device", None)
+    if display_device is None:
+        return False
+    return bool(getattr(display_device, "enable_display", False))
+
+
+def _device_categories(instance: Any) -> list[str]:
+    """Return the attached device categories observed on ``instance``.
+
+    Derived purely from the ``instances.get`` readback: every attached
+    disk (persistent vs. SCRATCH/local-SSD), every network interface,
+    every guest accelerator, and the virtual display when
+    ``display_device.enable_display`` is set. Anything the API reports
+    that does not map to a documented category is surfaced verbatim as
+    ``unknown_disk_type:<value>`` so a novel attachment kind shows up as a
+    signal instead of being silently normalized away.
+    """
+    categories: list[str] = []
+    for disk in getattr(instance, "disks", None) or []:
+        disk_type = str(getattr(disk, "type_", "") or getattr(disk, "type", "") or "").upper()
+        if disk_type == "SCRATCH":
+            categories.append("local_ssd")
+        elif disk_type in {"PERSISTENT", ""}:
+            # An unset type_ defaults to PERSISTENT per the instances API.
+            categories.append("persistent_disk")
+        else:
+            categories.append(f"unknown_disk_type:{disk_type.lower()}")
+    if getattr(instance, "network_interfaces", None):
+        categories.extend("network_interface" for _ in instance.network_interfaces)
+    for accelerator in getattr(instance, "guest_accelerators", None) or []:
+        count = int(getattr(accelerator, "accelerator_count", 0) or 0)
+        categories.extend("guest_accelerator" for _ in range(max(count, 1)))
+    if _virtual_display_enabled(instance):
+        categories.append(VIRTUAL_DISPLAY_CATEGORY)
+    return categories
+
+
+def _collect_provider_evidence(project: str, zone: str, instance_name: str) -> dict[str, Any]:
+    """Read the launched VM back and record Compute Engine hardening evidence.
+
+    The AWS oracle states its provider preamble as a constant because EC2
+    exposes no per-instance device inventory the step needs. Compute Engine
+    does (``instances.get``), so the preamble here is backed by the actual
+    attached-device inventory of the instance under test.
+    """
+    # get_instance already wraps instances.get in the shared idempotent-retry
+    # envelope (transient 429 / 5xx / transport-drop), so no second layer here.
+    instance = get_instance(project, zone, instance_name)
+    categories = _device_categories(instance)
+    observed = sorted(set(categories))
+    unexpected = [c for c in observed if c not in ALLOWED_DEVICE_CATEGORIES]
+    return {
+        "status": "completed",
+        "cloud": "gcp",
+        "service": "compute_engine",
+        "instance_id": instance_name,
+        "zone": short_name(getattr(instance, "zone", None)) or zone,
+        "machine_type": short_name(getattr(instance, "machine_type", None)),
+        "usb_redirection_surface": "absent",
+        "shared_clipboard_surface": "absent",
+        # Every category the readback actually inspected, so a clear result
+        # is distinguishable from a category that was never looked at.
+        "inspected_device_categories": list(INSPECTED_DEVICE_CATEGORIES),
+        "attached_device_categories": observed,
+        "attached_device_counts": {category: categories.count(category) for category in observed},
+        "virtual_display_enabled": _virtual_display_enabled(instance),
+        "unexpected_device_categories": unexpected,
+        "notes": PROVIDER_EVIDENCE_NOTE,
+    }
+
+
 def _base_tests() -> dict[str, dict[str, Any]]:
     """Return passing provider-control evidence before optional guest probes."""
     return {
         "usb_devices_disabled": {
             "passed": True,
-            "probes": ["gce_no_customer_usb_redirection_api"],
+            "probes": ["gce_no_customer_usb_redirection_api", "gce_instances_get_device_inventory"],
             "message": "Compute Engine exposes no tenant-facing USB redirection or attach surface",
         },
         "clipboard_disabled": {
@@ -249,19 +386,49 @@ def _base_tests() -> dict[str, dict[str, Any]]:
         },
         "unnecessary_virtual_devices_absent": {
             "passed": True,
-            "probes": ["gce_no_desktop_virtualization_peripheral_api"],
-            "message": "Compute Engine exposes no customer-controlled desktop peripheral redirection surface",
+            "probes": [
+                "gce_no_desktop_virtualization_peripheral_api",
+                "gce_instances_get_device_inventory",
+                "gce_instances_get_display_device_enable_display",
+            ],
+            "message": (
+                "Compute Engine exposes no desktop peripheral redirection surface; "
+                "its one customer-controlled virtual peripheral (display_device.enable_display) "
+                "is read back from the instance"
+            ),
         },
     }
 
 
+def _apply_provider_evidence(tests: dict[str, dict[str, Any]], provider_evidence: dict[str, Any]) -> None:
+    """Fold the ``instances.get`` device inventory into the subtest verdicts."""
+    if provider_evidence.get("status") != "completed":
+        return
+
+    categories = list(provider_evidence.get("attached_device_categories") or [])
+    unexpected = list(provider_evidence.get("unexpected_device_categories") or [])
+    test = tests["unnecessary_virtual_devices_absent"]
+    test["provider_signals"] = unexpected
+    test["attached_device_categories"] = categories
+    # Recorded on pass as well as fail: `false` here means the virtual
+    # display was read back and found off, not that it went unchecked.
+    test["virtual_display_enabled"] = bool(provider_evidence.get("virtual_display_enabled"))
+    if unexpected:
+        detail = _compact("; ".join(unexpected))
+        error = f"Unexpected attached device categories on the instance: {detail}"
+        if VIRTUAL_DISPLAY_CATEGORY in unexpected:
+            error += " (display_device.enable_display=true — virtual display attached to the instance)"
+        test.update({"passed": False, "error": error})
+
+
 def _apply_guest_probe(tests: dict[str, dict[str, Any]], guest_probe: dict[str, Any]) -> None:
-    """Mark failing tests for any guest-side signal in a completed probe."""
+    """Record guest-side signals and mark failing tests for any signal found."""
     if guest_probe.get("status") != "completed":
         return
 
     for signal_key, test_name, error_msg in SIGNAL_BINDINGS:
         signals = list(guest_probe.get(signal_key, []))
+        tests[test_name]["signals"] = signals
         if signals:
             tests[test_name].update({"passed": False, "error": f"{error_msg}: {_compact('; '.join(signals))}"})
 
@@ -271,8 +438,9 @@ def main() -> int:
     """Validate Compute Engine virtual-device hardening and emit structured JSON."""
     parser = argparse.ArgumentParser(description="Validate Compute Engine VM virtual-device hardening")
     parser.add_argument("--instance-id", required=True, help="Compute Engine instance name")
-    parser.add_argument("--region", default="", help="(unused) forwarded by orchestrator")
-    parser.add_argument("--zone", default="", help="(unused) forwarded by orchestrator")
+    parser.add_argument("--region", default="", help="GCP region (narrowed to a zone for instances.get)")
+    parser.add_argument("--zone", default="", help="GCP zone (overrides --region)")
+    parser.add_argument("--project", default=None, help="GCP project ID (ADC fallback)")
     parser.add_argument("--public-ip", default="", help="Optional SSH host for guest probes")
     parser.add_argument("--key-file", default="", help="Optional SSH private key path for guest probes")
     parser.add_argument("--ssh-user", default="ubuntu", help="SSH username")
@@ -285,6 +453,25 @@ def main() -> int:
     args = parser.parse_args()
 
     tests = _base_tests()
+
+    # 1. Provider-side evidence — derived from the zonal instances.get
+    # readback of the VM under test, not from a constant preamble.
+    provider_error: str | None = None
+    try:
+        project = resolve_project(args.project)
+        zone = args.zone or narrow_region_to_zone(args.region)
+        provider_evidence = _collect_provider_evidence(project, zone, args.instance_id)
+    except Exception as e:
+        # Bucket-classified below; the step must always emit JSON so the
+        # validation reads a real verdict instead of being silently skipped.
+        _bucket, provider_error = classify_gcp_error(e)
+        provider_error = _compact(provider_error)
+        provider_evidence = {"status": "unavailable", "error": provider_error}
+
+    _apply_provider_evidence(tests, provider_evidence)
+
+    # 2. Guest-side probes — identical to the AWS oracle (Linux-level
+    # commands have no cloud-vendor divergence).
     guest_probe_error: str | None = None
     try:
         guest_probe = _collect_guest_probe(args.public_ip, args.ssh_user, args.key_file, args.ssh_timeout)
@@ -296,16 +483,18 @@ def main() -> int:
 
     _apply_guest_probe(tests, guest_probe)
 
-    success = guest_probe_error is None and all(tests[name].get("passed") is True for name in REQUIRED_TESTS)
+    errors = [e for e in (provider_error, guest_probe_error) if e]
+    success = not errors and all(tests[name].get("passed") is True for name in REQUIRED_TESTS)
     result: dict[str, Any] = {
         "success": success,
         "platform": "vm",
         "test_name": "virtual_device_hardening",
         "instance_id": args.instance_id,
+        "provider_evidence": provider_evidence,
         "tests": tests,
     }
-    if guest_probe_error is not None:
-        result["error"] = guest_probe_error
+    if errors:
+        result["error"] = "; ".join(errors)
     print(json.dumps(result, indent=2))
     return 0 if success else 1
 

@@ -24,9 +24,13 @@ Divergences from the AWS oracle:
     from a fresh ``instances.get`` / ``wait_for_public_ip`` read —
     public IP is NOT preserved across stop/start on Compute Engine.
   * First-SSH-success is not enough: the guest agent may rewrite
-    authorized_keys mid-cloud-init replay. Gate on (1) cloud-init
-    completion AND (2) N consecutive successful SSH probes —
-    post-lifecycle steps gate on stability, not first SSH success.
+    authorized_keys mid-cloud-init replay. Gate on (1) first SSH
+    connectivity, THEN (2) cloud-init completion, THEN (3) N consecutive
+    successful SSH probes — in that order, because a stability streak
+    collected before the replay finishes observes an sshd that cloud-init
+    is about to restart. `ssh_ready` and `success` come from the final
+    post-cloud-init gate; post-lifecycle steps gate on stability, not on
+    first SSH success.
 """
 
 from __future__ import annotations
@@ -40,6 +44,9 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/scripts/
 
 from common.compute import (
+    CAPACITY_REACQUIRE_ATTEMPTS,
+    CAPACITY_REACQUIRE_BACKOFFS,
+    CAPACITY_REACQUIRE_BUDGET,
     canonical_state,
     first_external_ip,
     first_internal_ip,
@@ -51,8 +58,36 @@ from common.compute import (
     wait_for_public_ip,
 )
 from common.errors import handle_gcp_errors
-from common.ssh_utils import wait_for_cloud_init, wait_for_ssh_stable
+from common.ssh_utils import wait_for_cloud_init, wait_for_ssh, wait_for_ssh_stable
+from common.step_budget import StepBudget
 from google.cloud import compute_v1
+
+# Self-imposed wall-clock budget for the step, sister to the one
+# `launch_instance.py` enforces. Same hazard shape: the capacity ladder, the
+# 'running' poll, the public-IP poll, the SSH-reachability probe, the cloud-init
+# wait and the post-cloud-init SSH-stability gate run in SEQUENCE, each with its
+# own independent timeout, and the orchestrator kills an over-cap step with
+# `subprocess.run(timeout=...)` — SIGKILL, no signal, so the result payload
+# printed at the end never lands and the step reports nothing at all about the
+# VM it was starting.
+#
+# This step creates no resources, so there is nothing here to leak; what the
+# bound buys is a truthful `success=false` payload (with `start_initiated`,
+# `state`, and the fresh public IP) instead of an empty kill. Every wait after
+# the ladder is derived from what is left of the budget and keeps its full
+# window while the budget can fund it.
+#
+# Enforced bound: the ladder self-bounds at 660s (CAPACITY_REACQUIRE_BUDGET +
+# the op-wait floor) and the clock it burns is charged against everything after
+# it, so the worst case is 1080 + the floors below (30 state poll + 15 IP poll
+# + 25 SSH reachability probe + 30 cloud-init + 25 stability probe) = 1205s.
+# The provider config's 1500s cap clears that by ~295s. Each SSH floor is one
+# probe at `interval + SSH_PROBE_TIMEOUT_S` = 25s.
+_STEP_WALL_BUDGET = 1080.0
+_MIN_STATE_POLL_S = 30
+_MIN_IP_POLL_S = 15
+_MIN_CLOUD_INIT_S = 30
+_MIN_SSH_ATTEMPTS = 1
 
 
 @handle_gcp_errors
@@ -70,6 +105,11 @@ def main() -> int:
     )
     parser.add_argument("--ssh-user", default="ubuntu", help="SSH username")
     args = parser.parse_args()
+
+    # Start of the step's self-imposed wall clock (see `_STEP_WALL_BUDGET`),
+    # stamped before any cloud call so every derived wait accounts for the work
+    # already done.
+    budget = StepBudget(_STEP_WALL_BUDGET)
 
     project = resolve_project(args.project)
     zone = args.zone or narrow_region_to_zone(args.region)
@@ -104,10 +144,20 @@ def main() -> int:
             return 1
 
         # 2. Start; wait on zonal op then poll for canonical 'running'.
-        # Lifecycle ops are zone-bound (cannot walk on STOCKOUT) — wrap
-        # the sync+wait pair in the in-zone retry-with-backoff envelope
-        # (zone_capacity_handling: 3 attempts, 60s/120s backoff). The
-        # post-API stamp keeps
+        # Lifecycle ops are zone-bound (cannot walk on STOCKOUT, and a
+        # stopped instance's disk pins the zone anyway) — wrap the
+        # sync+wait pair in the in-zone retry-with-backoff envelope
+        # (zone_capacity_handling). This step uses the long
+        # CAPACITY_REACQUIRE_* ladder, not the short default one, because
+        # `stop` RELEASED this machine's zonal capacity and `start` has to
+        # take it back from a pool other tenants are drawing on: the
+        # default 3-attempt / 180s ladder was observed exhausting against a
+        # real g2-standard-8 STOCKOUT in us-central1-c.
+        # The long ladder gives the pool ~9 minutes to churn instead of ~3;
+        # it cannot rescue a stockout that outlasts the budget, but it does
+        # stop the step from surrendering while capacity is still moving.
+        # The budget bounds the whole envelope so the extra patience stays
+        # inside this step's configured cap. The post-API stamp keeps
         # start_initiated tied to a real API acknowledgement rather than
         # firing speculatively.
         print(f"Starting instance {args.instance_id}...", file=sys.stderr)
@@ -122,6 +172,9 @@ def main() -> int:
             zone,
             resource_desc=f"start {args.instance_id}",
             on_sync_success=_stamp_start_initiated,
+            attempts=CAPACITY_REACQUIRE_ATTEMPTS,
+            backoffs=CAPACITY_REACQUIRE_BACKOFFS,
+            budget=CAPACITY_REACQUIRE_BUDGET,
         )
 
         print("Waiting for canonical 'running' state...", file=sys.stderr)
@@ -130,7 +183,7 @@ def main() -> int:
             zone,
             args.instance_id,
             target_canonical="running",
-            timeout=300,
+            timeout=budget.wait_timeout(300, floor=_MIN_STATE_POLL_S),
         )
 
         # 3. Re-read details from live state — public IP is the critical
@@ -138,26 +191,41 @@ def main() -> int:
         # assigns a fresh one on start.
         inst = get_instance(project, zone, args.instance_id)
         result["private_ip"] = first_internal_ip(inst)
-        fresh_ip = first_external_ip(inst) or wait_for_public_ip(project, zone, args.instance_id, timeout=120)
+        fresh_ip = first_external_ip(inst) or wait_for_public_ip(
+            project,
+            zone,
+            args.instance_id,
+            timeout=budget.wait_timeout(120, floor=_MIN_IP_POLL_S),
+        )
         if not fresh_ip:
             result["error"] = "Instance has no external IP after start (timed out polling)"
             print(json.dumps(result, indent=2, default=str))
             return 1
         result["public_ip"] = fresh_ip
 
-        # 4. Stability gate. Consecutive SSH successes + cloud-init wait.
-        print("Waiting for SSH to stabilize after start...", file=sys.stderr)
-        ssh_ok = wait_for_ssh_stable(
+        # 4. Readiness gate, in the ONLY order that proves a settled guest:
+        # first SSH connectivity, THEN cloud-init completion, THEN the
+        # consecutive-success stability gate.
+        #
+        # Order is load-bearing, not stylistic. A start replays cloud-init and
+        # the guest agent restarts sshd and rewrites authorized_keys while that
+        # replay runs, so three consecutive SSH successes collected BEFORE
+        # cloud-init finishes describe the pre-replay sshd — they say nothing
+        # about the one downstream validators will connect to. Running the
+        # stability gate last is what makes `ssh_ready` a claim about the guest
+        # this step hands over. Mirrors the create path in `launch_instance.py`
+        # (SSH -> cloud-init -> stability), so both readiness gates read the
+        # same way.
+        print("Waiting for first SSH connectivity after start...", file=sys.stderr)
+        ssh_reachable = wait_for_ssh(
             host=fresh_ip,
             user=args.ssh_user,
             key_file=args.key_file,
-            consecutive=3,
+            max_attempts=budget.probe_attempts(20, interval=10, floor=_MIN_SSH_ATTEMPTS),
             interval=10,
-            max_attempts=36,
         )
-        result["ssh_ready"] = ssh_ok
-        if not ssh_ok:
-            result["error"] = "SSH did not stabilize after start"
+        if not ssh_reachable:
+            result["error"] = "SSH never accepted a connection after start"
             print(json.dumps(result, indent=2, default=str))
             return 1
 
@@ -165,11 +233,29 @@ def main() -> int:
             host=fresh_ip,
             user=args.ssh_user,
             key_file=args.key_file,
-            timeout_seconds=600,
+            timeout_seconds=budget.wait_timeout(600, floor=_MIN_CLOUD_INIT_S),
         )
         result["cloud_init_ok"] = cloud_init_ok
         if not cloud_init_ok:
             result["error"] = "cloud-init did not complete after start (rc != 0/2)"
+            print(json.dumps(result, indent=2, default=str))
+            return 1
+
+        # `ssh_ready` is derived from THIS gate — the post-cloud-init one — and
+        # never from the earlier reachability probe, so it is never a literal
+        # True and never an observation of the sshd cloud-init replaced.
+        print("Waiting for post-cloud-init SSH to stabilize...", file=sys.stderr)
+        ssh_ok = wait_for_ssh_stable(
+            host=fresh_ip,
+            user=args.ssh_user,
+            key_file=args.key_file,
+            consecutive=3,
+            interval=10,
+            max_attempts=budget.probe_attempts(36, interval=10, floor=_MIN_SSH_ATTEMPTS),
+        )
+        result["ssh_ready"] = ssh_ok
+        if not ssh_ok:
+            result["error"] = "SSH did not stabilize after cloud-init completed"
             print(json.dumps(result, indent=2, default=str))
             return 1
 

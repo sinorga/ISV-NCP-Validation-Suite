@@ -55,8 +55,9 @@ import google.auth
 from google.api_core import exceptions as gax
 from google.cloud import compute_v1
 
-from common.errors import retry_idempotent
+from common.errors import retry_idempotent, retry_idempotent_list
 from common.ownership import (
+    UnreconciledCandidate,
     description_with_invocation,
     has_invocation_description,
     new_invocation_id,
@@ -114,7 +115,7 @@ def _run_id_suffix(length: int = 8) -> str:
     """Return the suite ``RUN_ID`` (or a fresh UUID8) truncated to ``length``.
 
     Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g. manual stub
-    invocation without the harness setting the env var). MUST NOT raise on a
+    invocation without the suite setting the env var). MUST NOT raise on a
     missing env var — that would block ad-hoc reproduction.
     """
     sid = os.environ.get("RUN_ID") or os.environ.get("LS_RUN_ID") or ""
@@ -136,7 +137,7 @@ def unique_suffix(base: str, *, length: int = 8) -> str:
       * Same-session teardown deletes only its own resources.
 
     Falls back to a random UUID8 only when ``RUN_ID`` is unset (e.g.
-    manual stub invocation without the harness setting the env var).
+    manual stub invocation without the suite setting the env var).
     The helper MUST NOT raise on missing env var — that would block
     ad-hoc reproduction.
     """
@@ -155,8 +156,8 @@ def bounded_unique_name(prefix: str, *segments: str, length: int = 8, max_length
     """Compose a Compute-Engine-valid ``<prefix>[-seg...]-<runid>`` name (<=63 chars).
 
     ``unique_suffix`` alone overflows the 63-char Compute Engine name limit when
-    ``prefix`` is long — e.g. a step-isolated config folds the full step name
-    into a globally named resource arg, so ``isv-observability-net-<step>`` plus
+    ``prefix`` is long — e.g. a config that folds the step name into a
+    globally named resource arg, so ``isv-observability-net-<step>`` plus
     the per-invocation discriminator and the terminal run-id suffix exceeds 63
     and the create is rejected with HTTP 400 ``Invalid value for field``.
 
@@ -654,6 +655,31 @@ def wait_for_zonal_op(
         time.sleep(poll_interval)
 
 
+# Capacity-REACQUIRING lifecycle ladder. `instances.start` is the only
+# lifecycle verb that has to take zonal capacity back from the pool: stop
+# RELEASES the machine's capacity, and by the time the suite starts it again
+# another tenant may hold it (observed live on g2-standard-8 / nvidia-l4 in
+# us-central1-c — `ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS ... state:STOCKOUT`
+# on every attempt of the 3-attempt default ladder, which gives up after only
+# ~180s of backoff). `stop` (releases capacity) and `reset` (keeps the machine
+# allocated) never re-acquire, so they correctly keep the short default ladder.
+#
+# A stopped instance's disk is ZONAL, so unlike the create path there is no
+# zone to walk to — waiting in place is the only recovery. GPU stockouts churn
+# on a minutes timescale, so the ladder trades a longer in-zone wait for a
+# materially better chance of reclaiming capacity, and BUDGET bounds the whole
+# envelope so the extra patience can never outrun the step's configured cap.
+CAPACITY_REACQUIRE_ATTEMPTS = 10
+CAPACITY_REACQUIRE_BACKOFFS = (30, 60, 90, 120, 120, 120, 120, 120, 120)
+CAPACITY_REACQUIRE_BUDGET = 540
+
+# Floor for the per-attempt async op wait once a budget is in force. A start
+# operation that is going to succeed DONEs well inside this, so clamping to
+# the remaining budget never truncates a healthy op; the floor only bounds how
+# far past the budget the final attempt can run (budget + 120s worst case).
+_BUDGETED_OP_WAIT_FLOOR = 120
+
+
 def retry_zonal_lifecycle_op(
     op_fn: Callable[[], Any],
     project: str,
@@ -664,6 +690,7 @@ def retry_zonal_lifecycle_op(
     attempts: int = 3,
     backoffs: tuple[int, ...] = (60, 120),
     op_timeout: int = 600,
+    budget: float | None = None,
 ) -> compute_v1.Operation | None:
     """Run a zonal lifecycle op with stockout retry-in-place.
 
@@ -671,13 +698,23 @@ def retry_zonal_lifecycle_op(
     zone-bound — they
     cannot walk to a different zone on STOCKOUT. The only recovery is
     retry-with-backoff in the same zone, 3 attempts max with 60s / 120s
-    backoffs.
+    backoffs by default.
 
     ``op_fn`` must perform the synchronous API call and return the
     ``Operation``. ``on_sync_success`` (if supplied) fires AFTER each
     synchronous return but BEFORE the async wait — callers stamp their
     ``<verb>_initiated`` tracker there so the idempotent-lifecycle
     invariant holds even across retries.
+
+    ``budget`` (seconds, measured from entry) puts a wall-clock bound on the
+    whole retry envelope, which is what lets capacity-REACQUIRING callers pass
+    the long ``CAPACITY_REACQUIRE_*`` ladder without risking the orchestrator's
+    timeout kill: a backoff is only slept when it fits inside the remaining
+    budget, and each async op wait is clamped to what is left (floored at
+    ``_BUDGETED_OP_WAIT_FLOOR`` so a healthy op is never truncated). Envelope
+    worst case is therefore ``budget + _BUDGETED_OP_WAIT_FLOOR``. Leaving
+    ``budget`` unset preserves the historical unbounded-ladder behavior for the
+    short default callers.
 
     Stockout shapes covered:
       * Synchronous ``ResourceExhausted`` raise (shape 1).
@@ -688,8 +725,15 @@ def retry_zonal_lifecycle_op(
     Non-stockout exceptions re-raise immediately so transient API errors
     do not waste two backoffs.
     """
+    deadline: float | None = None
+    budget_label = ""
+    if budget is not None:
+        deadline = time.monotonic() + budget
+        budget_label = f"{budget:.0f}s"
     last_err: Exception | None = None
+    used = 0
     for attempt_idx in range(attempts):
+        used = attempt_idx + 1
         op: Any = None
         try:
             op = op_fn()
@@ -697,7 +741,11 @@ def retry_zonal_lifecycle_op(
                 on_sync_success()
             op_name = getattr(op, "name", None) or getattr(op, "operation", "")
             if op_name:
-                return wait_for_zonal_op(project, zone, op_name, timeout=op_timeout)
+                wait_timeout = op_timeout
+                if deadline is not None:
+                    remaining = int(deadline - time.monotonic())
+                    wait_timeout = max(_BUDGETED_OP_WAIT_FLOOR, min(op_timeout, remaining))
+                return wait_for_zonal_op(project, zone, op_name, timeout=wait_timeout)
             return None
         except Exception as e:
             last_err = e
@@ -706,14 +754,19 @@ def retry_zonal_lifecycle_op(
             if attempt_idx >= attempts - 1:
                 break
             wait = backoffs[min(attempt_idx, len(backoffs) - 1)]
+            if deadline is not None and time.monotonic() + wait >= deadline:
+                print(
+                    f"  stockout on {resource_desc} attempt {used}/{attempts}; "
+                    f"retry budget ({budget_label}) exhausted, giving up",
+                    file=sys.stderr,
+                )
+                break
             print(
-                f"  stockout on {resource_desc} attempt {attempt_idx + 1}/{attempts}; sleeping {wait}s before retry",
+                f"  stockout on {resource_desc} attempt {used}/{attempts}; sleeping {wait}s before retry",
                 file=sys.stderr,
             )
             time.sleep(wait)
-    raise RuntimeError(
-        f"Stockout retry exhausted for {resource_desc} after {attempts} attempts: {last_err}"
-    ) from last_err
+    raise RuntimeError(f"Stockout retry exhausted for {resource_desc} after {used} attempts: {last_err}") from last_err
 
 
 def wait_for_global_op(project: str, operation_name: str, *, timeout: int = 600) -> compute_v1.Operation:
@@ -1199,23 +1252,34 @@ _ISV_FIREWALL_DESCRIPTION = f"ISV validation SSH firewall rule ({_ISV_OWNERSHIP_
 ISV_NETWORK_TAG = "isv-test-vm"
 
 
-def _firewall_matches_ssh_shape(
+def _firewall_source_shape_is_trusted(
     rule: compute_v1.Firewall,
     network_short: str,
     source_ranges: list[str],
 ) -> bool:
-    """Return True iff the existing firewall rule matches the SSH-allow shape.
+    """Return True iff every NON-target invariant of the trusted SSH shape holds.
 
-    Every caller-depended property must be verified on reuse-adoption. A rule
-    with the ownership marker + description + port shape but ``disabled=True``
-    would be silently adopted, then SSH would time out at cloud-init wait and
-    teardown would skip the rule (because ``firewall_created=False``). Reject
-    disabled rules up front.
+    Shared by BOTH adoption paths so they can never drift into accepting
+    different ingress policies:
+
+      * ``_firewall_matches_ssh_shape`` — the create path adopting a
+        pre-existing rule under the run's own name, and
+      * ``verify_trusted_ssh_firewall_for_instance`` — the existing-instance
+        reuse path proving that an operator-owned VM's SSH ingress is
+        trusted-only.
+
+    Only the TARGET selector differs between them (each caller applies its own
+    rule): the create path knows the exact network tag it assigns, while the
+    adoption path must bind to whatever identity the operator's VM carries.
+
+    A rule with the right ports but ``disabled=True`` grants nothing, so it is
+    never a usable SSH path — reject it up front rather than adopting it and
+    timing out later at the readiness gate.
 
     ``source_ranges`` is the operator-trusted set derived from
-    ``NETWORK_FIREWALL_TRUST_IP``; a pre-existing rule whose source ranges do
-    not exactly equal it (including any rule that still allows ``0.0.0.0/0``)
-    is NOT reusable.
+    ``NETWORK_FIREWALL_TRUST_IP``; a rule whose source ranges do not exactly
+    equal it (including any rule that still allows ``0.0.0.0/0``) is NOT
+    trusted.
     """
     if rule.disabled:
         return False
@@ -1225,10 +1289,10 @@ def _firewall_matches_ssh_shape(
         return False
     # Every caller-depended invariant must be verified on reuse-adoption. Use
     # set-equality (not membership) against the trusted source ranges so a rule
-    # with extra CIDRs (e.g. an added `0.0.0.0/0`) or extra target tags is
-    # REJECTED rather than silently adopted with `firewall_created=False` —
-    # adopting a superset rule weakens the ingress policy AND persists post-run
-    # because teardown gates on the `firewall_created` flag.
+    # with extra CIDRs (e.g. an added `0.0.0.0/0`) is REJECTED rather than
+    # silently adopted with `firewall_created=False` — adopting a superset rule
+    # weakens the ingress policy AND persists post-run because teardown gates on
+    # the `firewall_created` flag.
     if set(rule.source_ranges) != set(source_ranges):
         return False
     # GCP evaluates an INGRESS rule's source as the UNION of source_ranges,
@@ -1241,8 +1305,6 @@ def _firewall_matches_ssh_shape(
     # be empty, so such a superset rule is REJECTED rather than silently adopted.
     if rule.source_tags or rule.source_service_accounts:
         return False
-    if set(rule.target_tags) != {ISV_NETWORK_TAG}:
-        return False
     # Require exactly one allowed entry: tcp/22. Multiple entries or
     # additional ports broaden the ingress beyond the caller-declared
     # scope and must be rejected.
@@ -1254,6 +1316,220 @@ def _firewall_matches_ssh_shape(
     if list(allowed.ports) != ["22"]:
         return False
     return True
+
+
+def _firewall_matches_ssh_shape(
+    rule: compute_v1.Firewall,
+    network_short: str,
+    source_ranges: list[str],
+) -> bool:
+    """Return True iff the existing firewall rule matches the SSH-allow shape.
+
+    Create-path adoption check: the rule must carry the trusted source shape
+    AND target EXACTLY the network tag this stub assigns to the instances it
+    launches. Extra target tags widen the rule to instances outside the run's
+    scope, so they are rejected rather than silently adopted with
+    ``firewall_created=False``.
+    """
+    if not _firewall_source_shape_is_trusted(rule, network_short, source_ranges):
+        return False
+    if set(rule.target_tags) != {ISV_NETWORK_TAG}:
+        return False
+    # Target selectors are a UNION as well: a rule whose target tags match but
+    # that ALSO names target service accounts applies to instances beyond the
+    # ISV network tag, which is the same over-broad adoption in the target
+    # dimension that the source checks above reject in the source dimension.
+    if rule.target_service_accounts:
+        return False
+    return True
+
+
+# --------------------------------------------------------------------- #
+# Trusted-ingress verification for an ADOPTED (operator-supplied) VM     #
+# --------------------------------------------------------------------- #
+
+_SSH_PORT = 22
+# Compute Engine accepts either the protocol name or its IANA number, and
+# `all` as the wildcard that covers every protocol/port.
+_TCP_PROTOCOL_TOKENS = frozenset({"tcp", "6"})
+_ALL_PROTOCOL_TOKENS = frozenset({"all", "*"})
+
+
+def _allowed_entry_opens_ssh(entry: compute_v1.Allowed) -> bool:
+    """Return True iff one ``allowed`` entry admits tcp/22 in ANY expressible form.
+
+    Deliberately BROADER than the trusted-shape matcher: this answers "does
+    this rule expose SSH to the instance at all", which is the question that
+    decides whether a rule must be judged. A narrow ``"22" in ports`` test
+    misses the three shapes that are the most permissive of all:
+
+      * ``I_p_protocol="all"`` — every protocol and every port;
+      * a tcp entry with an EMPTY ``ports`` list — Compute Engine reads that
+        as every port of the protocol;
+      * a port RANGE such as ``"20-30"`` that contains 22.
+
+    Missing any of them would let the most over-permissive rules pass
+    unexamined, which inverts the fail-closed contract.
+    """
+    proto = (entry.I_p_protocol or "").lower()
+    if proto in _ALL_PROTOCOL_TOKENS:
+        return True
+    if proto not in _TCP_PROTOCOL_TOKENS:
+        return False
+    ports = [str(port).strip() for port in (entry.ports or ()) if str(port).strip()]
+    if not ports:
+        return True
+    for spec in ports:
+        if "-" in spec:
+            low, _, high = spec.partition("-")
+            try:
+                if int(low) <= _SSH_PORT <= int(high):
+                    return True
+            except ValueError:
+                continue
+        elif spec == str(_SSH_PORT):
+            return True
+    return False
+
+
+def _instance_network_tags(instance: compute_v1.Instance) -> set[str]:
+    """Return the instance's network tags as a set (empty when untagged)."""
+    return set(getattr(getattr(instance, "tags", None), "items", None) or ())
+
+
+def _instance_service_account_emails(instance: compute_v1.Instance) -> set[str]:
+    """Return the service-account emails attached to the instance."""
+    return {sa.email for sa in (getattr(instance, "service_accounts", None) or ()) if sa.email}
+
+
+def _rule_applies_to_instance(
+    rule: compute_v1.Firewall,
+    instance_tags: set[str],
+    instance_service_accounts: set[str],
+) -> bool:
+    """Return True iff ``rule``'s target selector binds to this instance.
+
+    A rule with NO target tags and NO target service accounts applies to every
+    instance in the network — the broadest binding there is, and one that a
+    tag-intersection test would wrongly read as "does not cover this VM".
+    """
+    target_tags = set(rule.target_tags or ())
+    target_service_accounts = set(rule.target_service_accounts or ())
+    if not target_tags and not target_service_accounts:
+        return True
+    return bool(target_tags & instance_tags) or bool(target_service_accounts & instance_service_accounts)
+
+
+def _rule_scoped_to_instance_identity(
+    rule: compute_v1.Firewall,
+    instance_tags: set[str],
+    instance_service_accounts: set[str],
+) -> bool:
+    """Return True iff ``rule``'s target selector stays INSIDE this instance's identity.
+
+    The adoption-path counterpart of the create path's
+    ``target_tags == {ISV_NETWORK_TAG}`` check. An operator-supplied VM carries
+    whatever tags the operator chose, so the fixed tag cannot be required here;
+    what CAN be required — and is the same invariant — is that the rule's target
+    scope is non-empty and fully contained in the adopted instance's own tags /
+    service accounts. That rejects both an untargeted network-wide rule and a
+    rule that extends SSH to identities this VM does not carry.
+    """
+    target_tags = set(rule.target_tags or ())
+    target_service_accounts = set(rule.target_service_accounts or ())
+    if not target_tags and not target_service_accounts:
+        return False
+    return target_tags <= instance_tags and target_service_accounts <= instance_service_accounts
+
+
+def verify_trusted_ssh_firewall_for_instance(
+    project: str,
+    instance: compute_v1.Instance,
+    source_ranges: list[str],
+) -> str:
+    """Return the name of the trusted tcp/22 rule covering ``instance``; fail closed.
+
+    The existing-instance reuse path adopts a VM this run did not create and
+    then reports it as a verified fixture. That claim is only honest if the
+    adopted VM's SSH ingress satisfies the SAME policy a created VM's does, so
+    this verification is a REQUIREMENT of the reuse path, not a best-effort
+    lookup that may return ``None``. A lookup that accepts any rule with an
+    overlapping tag and a tcp/22 entry would let a run pass while depending on —
+    and, because ``firewall_created=False`` keeps teardown's hands off it,
+    preserving — a rule that allows SSH from the whole internet.
+
+    Every INGRESS rule on the instance's network that is ENABLED, binds to the
+    instance, and opens tcp/22 in any form is judged. Each such rule must match
+    the trusted shape (``_firewall_source_shape_is_trusted``) and be scoped to
+    the instance's own identity; one that does not is an over-permissive path to
+    the same VM, so its presence fails the adoption even when a compliant rule
+    also exists — GCP evaluates allow rules as a union, so the loosest covering
+    rule is the effective one.
+
+    Deny rules are NOT credited as mitigation: a higher-priority deny could in
+    principle neutralize a broad allow, but reconstructing GCP's full priority
+    evaluation from a listing is exactly the kind of inference that turns an
+    unverified state into a false pass. Ignoring them keeps the check
+    conservative in the safe direction.
+
+    Raises ``ValueError`` (operator-actionable, no fallback) when the instance
+    has no network interface, when an over-permissive covering rule exists, or
+    when no compliant rule covers the VM at all.
+    """
+    if not instance.network_interfaces:
+        raise ValueError(
+            f"adopted instance {instance.name!r} has no network interface; its SSH "
+            "ingress cannot be verified against "
+            f"{TRUSTED_SSH_SOURCE_ENV_VAR} and the instance must not be adopted"
+        )
+    network_short = short_name(instance.network_interfaces[0].network)
+    instance_tags = _instance_network_tags(instance)
+    instance_service_accounts = _instance_service_account_emails(instance)
+
+    rules = retry_idempotent_list(
+        compute_v1.FirewallsClient().list,
+        op_desc=f"firewalls.list {project} (adopted-instance trusted-ingress verification)",
+        project=project,
+    )
+
+    trusted: list[str] = []
+    over_permissive: list[str] = []
+    for rule in rules:
+        if rule.disabled:
+            continue
+        if rule.direction != "INGRESS":
+            continue
+        if short_name(rule.network) != network_short:
+            continue
+        if not _rule_applies_to_instance(rule, instance_tags, instance_service_accounts):
+            continue
+        if not any(_allowed_entry_opens_ssh(entry) for entry in (rule.allowed or ())):
+            continue
+        if _firewall_source_shape_is_trusted(rule, network_short, source_ranges) and _rule_scoped_to_instance_identity(
+            rule, instance_tags, instance_service_accounts
+        ):
+            trusted.append(rule.name)
+        else:
+            over_permissive.append(rule.name)
+
+    trusted_desc = f"{TRUSTED_SSH_SOURCE_ENV_VAR} ranges {','.join(source_ranges)}"
+    if over_permissive:
+        raise ValueError(
+            f"adopted instance {instance.name!r} is reachable on tcp/22 through firewall "
+            f"rule(s) {sorted(over_permissive)} that do not match the trusted SSH ingress "
+            f"shape (exactly the {trusted_desc}, no source tag / service-account selectors, "
+            "target scope inside this instance's own tags or service accounts, and a single "
+            "tcp/22 allow entry); refusing to adopt a VM behind an over-permissive SSH rule"
+        )
+    if not trusted:
+        raise ValueError(
+            f"no enabled tcp/22 INGRESS rule on network {network_short!r} both targets adopted "
+            f"instance {instance.name!r} and restricts SSH to the {trusted_desc}; refusing to "
+            "adopt a VM whose SSH ingress cannot be verified"
+        )
+    # Deterministic pick among equally-compliant rules so the emitted
+    # firewall_name does not depend on listing order.
+    return sorted(trusted)[0]
 
 
 def _firewall_has_isv_ownership(rule: compute_v1.Firewall) -> bool:
@@ -1273,6 +1549,7 @@ def insert_ssh_firewall(
     source_ranges: list[str],
     *,
     on_accepted: Callable[[], None] | None = None,
+    on_unreconciled: Callable[[UnreconciledCandidate, Exception, str], None] | None = None,
 ) -> tuple[str, Any]:
     """Submit a verified-reuse SSH firewall insert and return ``(name, op)``.
 
@@ -1284,10 +1561,32 @@ def insert_ssh_firewall(
     MARKED with a per-invocation discriminator in ``description`` and submitted
     through ``submit_owned_create``: on a clean accept OR on an ambiguous ack that
     exact-name readback confirms carries this invocation's marker, ``on_accepted``
-    fires so the caller stamps ``firewall_created=True`` BEFORE any op wait. A
-    definite ``Conflict`` never transfers ownership — it routes to verified-reuse
-    adoption below. ``on_accepted`` is optional so other-domain callers that do
-    not (yet) need the ownership callback keep the prior return-then-stamp flow.
+    fires so the caller stamps ``firewall_created=True`` BEFORE any op wait.
+
+    A 409 is reconciled the same way rather than being assumed to be somebody
+    else's rule. ``firewalls.insert`` is not idempotent-by-token, so an internal
+    SDK/transport retry of THIS invocation's own insert draws a 409 for a rule
+    this run created; adopting that rule as pre-existing operator state would
+    keep ``firewall_created=False`` and preserve a rule the run must delete. The
+    marker decides: our marker means ownership transfers (below, and inside the
+    helper), any other marker means verified-reuse adoption of a genuinely
+    pre-existing rule.
+
+    ``on_accepted`` is the ONLY channel that reports the ambiguous-ack ownership
+    transfer: on that path the helper re-raises the original error, so a caller
+    that infers ownership from a normal return instead of supplying the callback
+    can never learn about a rule that committed after a lost response. Any caller
+    whose cleanup or teardown gates on a ``firewall_created``-style flag MUST
+    therefore pass ``on_accepted`` and set that flag from inside it. The
+    parameter stays optional only for callers that delete the rule
+    unconditionally by name and hold no such ownership flag.
+
+    ``on_unreconciled`` receives ``(candidate, error, detail)`` when the
+    reconciling readback is DENIED or keeps failing — the state where the rule
+    may exist but ownership cannot be proven either way. Nothing is deleted on
+    that unproven claim; the caller persists the candidate (project + name +
+    invocation marker) so a later teardown/reclamation pass can re-verify the
+    marker and finish the job. Callers that omit it drop such a handoff.
 
     ``source_ranges`` is the operator-trusted IPv4 source list resolved from
     ``NETWORK_FIREWALL_TRUST_IP`` (see ``resolve_trusted_ssh_source_ranges``).
@@ -1331,8 +1630,45 @@ def insert_ssh_firewall(
     def _owns(existing: compute_v1.Firewall) -> bool:
         return has_invocation_description(existing, invocation_id)
 
+    accepted_notified = False
+
+    def _stamp_accepted() -> None:
+        """Transfer ownership to the caller AT MOST ONCE.
+
+        Both the helper's reconciliation and the conflict/reuse readback below
+        can prove this invocation's marker on the same rule, and a caller that
+        counts acceptances (rather than setting a flag) must not see two.
+        """
+        nonlocal accepted_notified
+        if accepted_notified or on_accepted is None:
+            return
+        accepted_notified = True
+        on_accepted()
+
+    def _retain_candidate(error: Exception, detail: str) -> None:
+        if on_unreconciled is None:
+            return
+        on_unreconciled(
+            UnreconciledCandidate(
+                resource_type="firewall",
+                name=name,
+                project=project,
+                # Firewall rules are project-global: no zone scope to record.
+                zone="",
+                invocation_id=invocation_id,
+            ),
+            error,
+            detail,
+        )
+
     try:
-        op = submit_owned_create(_submit, _read_back, _owns, on_accepted=on_accepted)
+        op = submit_owned_create(
+            _submit,
+            _read_back,
+            _owns,
+            on_accepted=_stamp_accepted if on_accepted is not None else None,
+            on_unreconciled=_retain_candidate if on_unreconciled is not None else None,
+        )
     except gax.Conflict:
         existing = retry_idempotent(
             fw_client.get,
@@ -1340,6 +1676,19 @@ def insert_ssh_firewall(
             firewall=name,
             op_desc=f"firewalls.get {name} (reuse readback)",
         )
+        # Re-check the per-invocation marker on the way into adoption. The
+        # helper already reconciled this 409, but its readback can be
+        # inconclusive (denied/transient) exactly when this get later succeeds,
+        # and adopting our OWN rule as pre-existing state is how a run-created
+        # rule ends up preserved by teardown. `_stamp_accepted` is the
+        # at-most-once gate, so proving the marker twice still transfers
+        # ownership exactly once.
+        if has_invocation_description(existing, invocation_id):
+            print(
+                f"  firewall {name} conflict carries this invocation's marker; claiming ownership",
+                file=sys.stderr,
+            )
+            _stamp_accepted()
         if not _firewall_has_isv_ownership(existing):
             raise RuntimeError(
                 f"firewall {name!r} exists in {project} without ownership marker "

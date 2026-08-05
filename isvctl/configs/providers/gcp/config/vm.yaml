@@ -47,10 +47,36 @@ commands:
   vm:
     phases: ["setup", "test", "teardown"]
     steps:
-      # 1. Launch a GPU VM (compute_v1.insert). Cap parity with the AWS
-      # oracle's launch step; per-zone op waits and the multi-zone walk
-      # are bounded inside the stub via deadline budgets, not summed into
-      # the orchestrator cap.
+      # 1. Launch a GPU VM (compute_v1.insert).
+      #
+      # timeout: this cap is NOT an estimate that has to stay in step with the
+      # stub's internal waits — the stub bounds its own wall clock. That
+      # matters more here than anywhere else in this domain: every wait on the
+      # create path runs in SEQUENCE (firewall op, per-zone insert op, 'running'
+      # poll, public-IP poll, then the SSH + cloud-init + SSH-stability
+      # readiness gate), the readiness gate ALONE is worth ~1700s at its own
+      # worst case, and a kill here is not a mere failed step. The orchestrator
+      # kills with subprocess.run(timeout=...) — SIGKILL, no signal — so the
+      # `except` compensating cleanup never runs AND the stdout JSON (printed
+      # once, at the end) never lands. Teardown would then get no instance_id /
+      # instance_created / leaked_zones and, by its own ownership gate, refuse
+      # to delete a VM it cannot prove the run created: a billable GPU VM plus
+      # its firewall rule leak with no reclamation path. The earlier cap was
+      # sized against the adoption envelope alone and under-counted that
+      # readiness gate entirely.
+      #
+      # The stub stamps a 1020s budget (_STEP_WALL_BUDGET) at entry and derives
+      # every wait from what is left of it, then stamps a SEPARATE 300s reserve
+      # (_CLEANUP_RESERVE) when the failure path starts so the deletes always
+      # get a window of their own. Worst case is those budgets plus the floors
+      # each derived wait is still granted once they are spent:
+      #   provisioning 1020 + 185 floors = 1205s
+      #   cleanup       300 + 300 floors + 115 delete-retry backoff = 715s
+      # 2100s clears that 1920s bound by ~180s, which is what keeps the kill
+      # from ever landing before the cleanup and the ownership payload.
+      # No individual wait was shortened to get there: on the observed create
+      # path the whole sequence finishes in ~2 min, so the clamp only engages
+      # on the tail where the alternative is the leak.
       - name: launch_instance
         phase: setup
         command: "python3 ../scripts/vm/launch_instance.py"
@@ -75,7 +101,17 @@ commands:
           - "{{key_name}}"
           - "--ssh-user"
           - "{{ssh_user}}"
-        timeout: 900
+          # Preservation reaches the fixture-owning setup step, not only the
+          # terminal teardown: this step's setup-FAILURE path deletes the
+          # instance, firewall, and local key it created, and that runs long
+          # before teardown consults the same operator decision. With
+          # GCP_VM_SKIP_TEARDOWN set, --skip-destroy suppresses that
+          # compensating deletion so the exact failed fixture state survives
+          # for debugging (ownership output stays truthful, so the standalone
+          # `teardown.py --from-launch-output` replay can still reclaim it).
+          # Unset -> empty token, dropped by the renderer -> normal cleanup.
+          - "{{teardown_flag}}"
+        timeout: 2100
 
       # 2. List instances filtered by network (compute_v1.aggregated_list).
       - name: list_instances
@@ -120,8 +156,23 @@ commands:
 
       # 4b. Console RBAC probe — three subtests. Default path
       # self-provisions denied/allowed probe service accounts and a
-      # second VM, then mints short-lived tokens via IAMCredentials REST
-      # to call getSerialPortOutput as each principal.
+      # second VM, then mints short-lived tokens with the IAMCredentials
+      # SDK client to call getSerialPortOutput as each principal.
+      #
+      # timeout: sized to the stub's own IAM-convergence budgets, which are
+      # SEQUENTIAL and therefore sum: the target-role grant retries a
+      # not-yet-propagated member 13 x 15s (195s), each of the two
+      # generate_access_token calls retries the propagation shapes
+      # 11 x 15s (165s each), and
+      # the probe-VM insert wait is capped at 300s — ~990s before the
+      # `finally` cleanup that deletes the probe VM, both probe SAs, and the
+      # target-VM binding. Those budgets exist because SA/IAM propagation has
+      # been observed at ~3 minutes, so shrinking them would trade a leak for
+      # flaky denials; the cap is raised instead. At the previous 600s a run
+      # that spent its full propagation budget would be killed before the
+      # `finally` ran (subprocess.run kills the child outright, no signal),
+      # orphaning both probe SAs, the probe VM, and the role binding this step
+      # adds to the operator's instance.
       - name: console_rbac
         phase: test
         command: "python3 ../scripts/vm/console_rbac.py"
@@ -134,6 +185,70 @@ commands:
           - "{{steps.launch_instance.zone | default(zone)}}"
           - "--network"
           - "{{steps.launch_instance.vpc_id | default(network, true)}}"
+          # This step self-provisions fixtures it destroys in its own `finally`
+          # (two probe service accounts, the probe VM, and the IAM bindings) —
+          # all of it long before the terminal teardown step runs. Forward the
+          # SAME preservation decision so GCP_VM_SKIP_TEARDOWN keeps that whole
+          # fixture set intact; the step then emits preserved_fixtures, which
+          # `console_rbac.py --reclaim-preserved <output.json>` replays under
+          # the same marker-verified ownership gates to clean up later.
+          - "{{teardown_flag}}"
+        timeout: 1200
+
+      # 4b-bis. AUTH03 specified-key component access. Compute Engine has
+      # no managed key-pair store, so the "specified key" identity is
+      # launch_instance.instance_key_name — the label its ssh-keys metadata
+      # readback CONFIRMED (launch_instance.key_name is always null here, so
+      # forwarding it would carry no information). Boolean-mode defaults keep
+      # the argv pair aligned when the readback did not confirm the key; the
+      # stub treats the "none" sentinel as "no verified key identity" and
+      # fails honestly instead of substituting the requested label.
+      #
+      # Environment prerequisite: the host running this suite needs outbound
+      # TCP 9600 to <REGION>-ssh-serialport.googleapis.com. That connection IS
+      # the AUTH03 evidence, so an unreachable gateway fails the step with a
+      # configuration error instead of passing — it is a local egress gap, not
+      # a platform capability removal (the compute.disableSerialPortAccess
+      # organization policy is the capability removal, and still skips
+      # cleanly). This check must PASS to admit the run, so the failure has no
+      # override: there is no environment variable that turns unopened egress
+      # into a skip, because a skipped validation counts as passed and would
+      # leave the released AUTH03 property unproven behind a green run. Open
+      # the egress on the validation host instead.
+      #
+      # timeout: this cap is NOT an estimate that has to stay in step with the
+      # stub's retry ladders — the stub bounds its own wall-clock. It stamps a
+      # 480s budget (_STEP_WALL_BUDGET) at entry and runs BOTH serial-port-enable
+      # metadata writes under deadlines carved from what is left of it, holding
+      # 120s back (_RESTORE_RESERVE) for the restore that runs in its `finally`.
+      # Worst case is therefore that budget plus the floors the restore is
+      # always granted (30s of write budget + a 15s op-confirm window = 525s),
+      # even when every write exhausts its 3-attempt ladder against a throttled
+      # control plane; the earlier arithmetic here under-counted because it
+      # charged a single 120s setMetadata op-wait for the enable and the
+      # restore together.
+      # 600s clears the enforced bound with ~75s of margin, which is what keeps
+      # the orchestrator's timeout kill (subprocess.run(timeout=...) kills the
+      # child outright — no signal, so no `finally`) from landing before the
+      # restore. That matters most on a run that ADOPTED an operator VM
+      # (GCP_VM_INSTANCE_ID): teardown preserves that instance, so a
+      # serial-port-enable left TRUE would stay on a long-lived host.
+      - name: component_key_access
+        phase: test
+        command: "python3 ../scripts/vm/component_key_access.py"
+        args:
+          - "--instance-id"
+          - "{{steps.launch_instance.instance_id}}"
+          - "--key-file"
+          - "{{steps.launch_instance.key_file | default('none', true)}}"
+          - "--key-name"
+          - "{{steps.launch_instance.instance_key_name | default('none', true)}}"
+          - "--region"
+          - "{{region}}"
+          - "--zone"
+          - "{{steps.launch_instance.zone | default(zone)}}"
+          - "--ssh-user"
+          - "{{ssh_user}}"
         timeout: 600
 
       # 4c. Virtual-device hardening evidence — three subtests
@@ -184,14 +299,40 @@ commands:
           - "{{ssh_user}}"
         timeout: 900
 
-      # 6. Start (compute_v1.start) — re-reads fresh public IP. The step
-      # cap must be strictly greater than the longest SINGLE internal
-      # wait: the 600s cloud-init `--wait` after start ('running' state
-      # poll, public-IP poll, and the SSH-stability gate are all shorter).
-      # 900s gives headroom above that 600s deadline, matching the reboot
-      # step's cap and absorbing GCP's slower compute_v1.start operation
-      # polling and cloud-init re-arming on g2-standard-8. Internal waits
-      # are deadline-bounded inside the stub, so the cap is not a sum.
+      # 6. Start (compute_v1.start) — re-reads fresh public IP. Like
+      # launch_instance, this cap does not track the stub's individual waits:
+      # they run in SEQUENCE (stockout ladder, 'running' poll, public-IP poll,
+      # SSH reachability, cloud-init `--wait`, post-cloud-init SSH-stability
+      # gate) and summing them in a comment is how the number goes stale.
+      # The stub stamps a 1080s budget
+      # (_STEP_WALL_BUDGET) at entry and derives every wait after the ladder
+      # from what is left of it.
+      #
+      #   * The stockout envelope is FRONT-LOADED and self-bounding at 660s.
+      #     `stop` RELEASES this VM's zonal capacity and `start` has to reclaim
+      #     it from a pool other tenants draw on, so the stub retries in place
+      #     on the long CAPACITY_REACQUIRE_* ladder (a stopped instance's disk
+      #     pins the zone — there is nothing to walk to). `common/compute.py`
+      #     enforces that bound: 540s of retry budget plus the 120s op-wait
+      #     floor granted to the final attempt. Whatever it burns is charged
+      #     against every wait that follows it.
+      #   * Everything after it keeps its full window while the budget can fund
+      #     it, and floors (30 state poll + 15 IP poll + 25 SSH reachability +
+      #     30 cloud-init + 25 post-cloud-init stability = 125s) once it
+      #     cannot. Each SSH floor is one probe at interval + the probe's own
+      #     connect timeout (10 + 15).
+      #
+      # Enforced bound is therefore 1080 + 125 = 1205s, and 1500s clears it by
+      # ~295s. This step creates nothing, so an over-cap kill would not leak —
+      # it would only discard the payload (start_initiated, state, fresh public
+      # IP) that makes the failure diagnosable. The old 900s cap predated the
+      # long ladder and would let the kill land mid-envelope, while the step was
+      # still waiting out a stockout it is now given the budget to survive.
+      # Raised from 900 after a real run failed here with
+      # ZONE_RESOURCE_POOL_EXHAUSTED_WITH_DETAILS (STOCKOUT) on
+      # g2-standard-8 in us-central1-c, exhausting the old 3-attempt
+      # ladder ~180s after the VM's own capacity was released by
+      # stop_instance.
       #
       # --instance-id reads from stop_instance (launch_instance fallback)
       # rather than launch_instance directly. start_instance.py hard-gates
@@ -199,13 +340,14 @@ commands:
       # against a running VM is an error, so the lifecycle proves a real
       # stop→start transition, not a no-op). stop_instance is the only step
       # that stops the VM, so it is a true ordering dependency of this step.
-      # The orchestrator derives per-step live-slice scope purely from
-      # {{steps.*}} references, so without a stop_instance reference an
-      # isolated start_instance slice would skip stop_instance, leave the VM
-      # RUNNING, and fail the stopped precondition. Reading instance_id from
-      # stop_instance keeps it in scope (mirroring how reboot_instance
-      # chains start_instance.public_ip); the boolean-mode launch_instance
-      # default keeps the value resolving if stop_instance is ever absent.
+      # Reading instance_id from stop_instance makes that dependency
+      # explicit in the wiring: a run that trims the test phase down to
+      # this step (`-- -k start_instance`, or a config that comments out
+      # the other steps) still has to keep stop_instance, because dropping
+      # it would leave the VM RUNNING and fail the stopped precondition.
+      # This mirrors how reboot_instance chains start_instance.public_ip;
+      # the boolean-mode launch_instance default keeps the value resolving
+      # if stop_instance is ever absent.
       - name: start_instance
         phase: test
         command: "python3 ../scripts/vm/start_instance.py"
@@ -220,7 +362,7 @@ commands:
           - "{{steps.launch_instance.key_file}}"
           - "--ssh-user"
           - "{{ssh_user}}"
-        timeout: 900
+        timeout: 1500
 
       # 7. Reset (compute_v1.reset) — SSH-drop wait + stability gate.
       # Cap parity with the AWS oracle reboot step; ssh-drop, ssh-stable,
@@ -261,8 +403,8 @@ commands:
         timeout: 120
 
       # 9. Deploy NIM (shared paramiko script). On canonical GCP runs the
-      # operator's environment provides NGC_API_KEY (forwarded by the
-      # harness server); the shared script gracefully skips with
+      # operator's environment provides NGC_API_KEY (exported before
+      # `isvctl test run`); the shared script gracefully skips with
       # success=True / skipped=True / rc=0 when the credential is missing,
       # so leaving the step active here keeps the NIM validation honest on
       # equipped operators without producing false failures otherwise.
@@ -283,22 +425,51 @@ commands:
       # ("none"/"null"/"") and missing-NGC auto-skip paths were removed, so a
       # forwarded "none" host no longer policy-skips — without --skip the
       # script SSHes straight to --host (which is required=True). We therefore
-      # forward --skip keyed on deploy_nim's skip state, mirroring the AWS
-      # oracle (aws/config/vm.yaml): when deploy_nim was skipped (no
-      # NGC_API_KEY, nothing deployed) the script no-ops its SSH work and emits
-      # the canonical policy-skip JSON; otherwise it tears down the container
-      # deploy_nim placed on steps.reboot_instance.public_ip (the only host
-      # deploy_nim ever targets, so teardown_nim targets the same host — no
-      # start_instance fallback). The host/key still carry a non-empty "none"
-      # default so the flag/value argv pair survives _render_args on a per-step
-      # slice where reboot_instance renders empty (empty defaults are DROPPED by
-      # the orchestrator). On a slice where deploy_nim did not run,
-      # steps.deploy_nim.skipped is absent -> default(false) -> no --skip, so the
-      # "none" host drives a best-effort SSH that fails fast on DNS resolution
-      # (no hang, leak, or false success); on the full run deploy_nim emits
-      # skipped=True and --skip no-ops the SSH cleanly. timeout bumped 180->300
-      # to clear the shared script's 240s CONTAINER_REMOVE_TIMEOUT (docker rm -f)
-      # plus the 30s SSH-connect budget, matching the AWS oracle cap.
+      # forward --skip when nothing was deployed: the script then no-ops its SSH
+      # work and emits the canonical policy-skip JSON; otherwise it tears down
+      # the container deploy_nim placed on steps.reboot_instance.public_ip (the
+      # only host deploy_nim ever targets, so teardown_nim targets the same host
+      # — no start_instance fallback). The host/key still carry a non-empty
+      # "none" default so the flag/value argv pair survives _render_args when
+      # reboot_instance renders empty (empty defaults are DROPPED by the
+      # orchestrator). timeout bumped 180->300 to clear the shared script's 240s
+      # CONTAINER_REMOVE_TIMEOUT (docker rm -f) plus the 30s SSH-connect budget,
+      # matching the AWS oracle cap.
+      #
+      # The --skip predicate has TWO arms, both guarding the same failure mode:
+      # a teardown_nim that SSHes to the literal "none" host. That does NOT fail
+      # fast on DNS as an earlier revision of this comment assumed — paramiko
+      # burns its full 30s connect budget and the step reports [timeout],
+      # failing StepSuccessCheck-nim_teardown and the whole run for a container
+      # that was never deployed. Re-confirmed on a real run where
+      # start_instance failed on a zone stockout, the orchestrator skipped the
+      # rest of the test phase, and this step ran `--host none` -> "[teardown_nim]
+      # ERROR: [timeout] SSH connection timed out after 30s" -> [FAIL] TEARDOWN
+      # even though the real teardown passed. Keep BOTH arms: dropping either
+      # one reopens that failure mode.
+      #
+      # Arm 1 — deploy_nim state, defaulting to TRUE, not false (deliberately
+      # diverging from the AWS oracle's default(false)). A step that a config
+      # left out, or that was never reached because an earlier
+      # step failed, emits no output at all, so steps.deploy_nim.skipped is
+      # UNDEFINED (not True) and a false default would yield no --skip.
+      # Defaulting to true is also the only correct reading of "did deploy_nim
+      # put a container on the box": a step that never ran deployed nothing. The
+      # default cannot mask a real deploy because shared/deploy_nim.py seeds
+      # "skipped": False in its result dict and only flips it to True on the
+      # NGC_API_KEY policy skip, so whenever the step actually runs the key is
+      # defined and wins — including the deploy-failed-mid-flight case, where
+      # skipped=False still drives the real SSH cleanup. Nor can it leak: the
+      # `teardown` step below deletes the VM (and with it any container).
+      #
+      # Arm 2 — host sentinel. Also emit --skip when the host collapses to
+      # "none", i.e. reboot_instance produced no public_ip. That host is the
+      # ONLY one deploy_nim ever targets, so "no host" implies "nothing was
+      # deployed" and the policy-skip is honest rather than leak-hiding.
+      #
+      # On the full-domain happy path deploy_nim reports skipped=False and
+      # reboot_instance supplies a real IP, so BOTH arms are false, the token
+      # renders empty, and the real container cleanup runs.
       - name: teardown_nim
         phase: teardown
         command: "python3 ../../shared/teardown_nim.py"
@@ -309,10 +480,12 @@ commands:
           - "{{steps.reboot_instance.key_file | default('none', true)}}"
           - "--user"
           - "{{steps.reboot_instance.ssh_user | default(ssh_user, true)}}"
-          # Skip teardown when deploy_nim was skipped; the shared script
-          # supplies the default --skip-reason. Renders to an empty token
-          # (dropped by _render_args) when deploy_nim actually ran.
-          - "{{ '--skip' if steps.deploy_nim.skipped | default(false) else '' }}"
+          # Skip teardown when deploy_nim policy-skipped or never ran at all,
+          # and when the target host collapsed to the "none" sentinel; the
+          # shared script supplies the default --skip-reason. Renders to an
+          # empty token (dropped by _render_args) only when deploy_nim actually
+          # deployed to a real host.
+          - "{{ '--skip' if (steps.deploy_nim.skipped | default(true)) or ((steps.reboot_instance.public_ip | default('none', true)) == 'none') else '' }}"
         timeout: 300
 
       # 11. Teardown — gates instance + firewall + key cleanup on
@@ -351,6 +524,16 @@ commands:
           # Boolean-mode defaulting converts both undefined and empty
           # values to the sentinel so the teardown argv stays aligned.
           - "{{steps.launch_instance.leaked_zones | join(',') | default('none', true)}}"
+          - "--unreconciled-resources"
+          # Ambiguous-create candidates: resources launch_instance may have
+          # committed before losing the acknowledgement, whose ownership its
+          # readback could not settle. They carry no *_created bit precisely
+          # because none could be set honestly, so this is the ONLY channel
+          # that keeps the handoff alive to the terminal cleanup; teardown
+          # re-verifies each recorded invocation marker before deleting and
+          # never touches a mismatch. Same packed-record + join(',') +
+          # non-empty-sentinel shape as leaked_zones above.
+          - "{{steps.launch_instance.unreconciled_resources | join(',') | default('none', true)}}"
           - "{{teardown_flag}}"
         # Cap parity with the AWS oracle teardown; per-resource op waits
         # and leaked-zone cleanup are bounded inside the stub via
@@ -396,6 +579,13 @@ tests:
     firewall_name: "isv-test-vm-ssh"
     key_name: "isv-test-key"
     ssh_user: "ubuntu"
+    # OPTIONAL. GCP_VM_SKIP_TEARDOWN=true -> preserve the run-created VM-domain
+    # resources, forwarded as --skip-destroy to EVERY step that can delete a
+    # fixture it owns — not only the terminal teardown. That means the
+    # `launch_instance` setup-failure compensating cleanup and the
+    # `console_rbac` probe-fixture cleanup as well; a config that gated only
+    # teardown would still destroy the exact fixtures the operator asked to
+    # keep, because those in-step cleanups run first.
     teardown_flag: "{{(env.GCP_VM_SKIP_TEARDOWN == 'true') | ternary('--skip-destroy', '')}}"
 
   # GCP-specific validator overrides.

@@ -55,6 +55,15 @@ _SSH_OPTS: tuple[str, ...] = (
     "ConnectTimeout=5",
 )
 
+# Public alias of the canonical option set for the few call sites that must
+# build a NON-standard SSH argv and therefore cannot go through ``ssh_run`` /
+# ``_try_ssh`` — currently only the Compute Engine interactive serial-console
+# gateway, which is reached on a dedicated port with a structured gateway
+# username instead of ``<user>@<host>`` plus a remote command. Exporting the
+# tuple keeps those call sites on the SAME option semantics as every other
+# GCP SSH probe (sister-stub consistency rule) instead of re-deriving them.
+SSH_CANONICAL_OPTS: tuple[str, ...] = _SSH_OPTS
+
 
 def _ssh_argv(host: str, user: str, key_file: str, remote_cmd: str) -> list[str]:
     """Build a canonical ``ssh`` argv: shared ``_SSH_OPTS`` + ``-i <key>`` + ``<user>@<host>`` + ``<remote_cmd>``.
@@ -66,13 +75,23 @@ def _ssh_argv(host: str, user: str, key_file: str, remote_cmd: str) -> list[str]
     return ["ssh", *_SSH_OPTS, "-i", key_file, f"{user}@{host}", remote_cmd]
 
 
+# Per-probe wall cost of `_try_ssh`. Public because the probe LADDERS below
+# (`wait_for_ssh`, `wait_for_ssh_stable`, `wait_for_ssh_drop`) cost
+# `interval + SSH_PROBE_TIMEOUT_S` per attempt against an unreachable guest —
+# the probe itself blocks for its full timeout before the interval sleep even
+# starts. A caller sizing a ladder against a wall-clock budget must divide the
+# remaining time by that real per-attempt cost; dividing by `interval` alone
+# under-counts the ladder by more than half.
+SSH_PROBE_TIMEOUT_S = 15
+
+
 def _try_ssh(host: str, user: str, key_file: str, remote_cmd: str = "exit 0") -> bool:
     """Single SSH probe. Returns True on rc=0; False on rc!=0 / OSError / timeout."""
     try:
         result = subprocess.run(
             _ssh_argv(host, user, key_file, remote_cmd),
             capture_output=True,
-            timeout=15,
+            timeout=SSH_PROBE_TIMEOUT_S,
         )
         return result.returncode == 0
     except (subprocess.TimeoutExpired, OSError):
