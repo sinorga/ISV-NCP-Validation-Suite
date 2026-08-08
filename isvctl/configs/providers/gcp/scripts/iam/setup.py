@@ -55,14 +55,27 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/scripts/
 
 from common.compute import resolve_project
-from common.errors import classify_gcp_error, handle_gcp_errors
+from common.errors import classify_gcp_error, handle_gcp_errors, retry_idempotent_list
 from google.cloud import iam_admin_v1
 
 
 def _count_service_accounts(project: str) -> int:
-    """Return the number of service accounts in ``project`` (read-only)."""
+    """Return the number of service accounts in ``project`` (read-only).
+
+    ``list_service_accounts`` returns a LAZY pager, so iterating it outside a
+    retry envelope leaves every deferred page fetch exposed to a transient
+    429 / 5xx. Materializing the full listing inside ``retry_idempotent_list``
+    retries the whole idempotent read instead of failing an inventory that was
+    one blip from succeeding.
+    """
     iam = iam_admin_v1.IAMClient()
-    return sum(1 for _ in iam.list_service_accounts(name=f"projects/{project}"))
+    return len(
+        retry_idempotent_list(
+            iam.list_service_accounts,
+            op_desc="iam.list_service_accounts (inventory)",
+            name=f"projects/{project}",
+        )
+    )
 
 
 @handle_gcp_errors

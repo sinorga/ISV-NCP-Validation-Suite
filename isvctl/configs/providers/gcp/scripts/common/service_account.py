@@ -49,9 +49,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from typing import Any, cast
 
 import google.auth
@@ -66,9 +67,15 @@ from google.iam.v1 import iam_policy_pb2, policy_pb2
 from common.errors import TRANSIENT_EXCEPTIONS, is_transport_disconnect, retry_idempotent
 from common.network import insert_instance
 from common.ownership import (
+    RECONCILE_ABSENT,
+    RECONCILE_FOREIGN,
+    RECONCILE_INCONCLUSIVE,
+    RECONCILE_OWNED,
+    UnreconciledCandidate,
     description_with_invocation,
     has_invocation_description,
     new_invocation_id,
+    reconcile_owned,
     submit_owned_create,
 )
 
@@ -92,14 +99,40 @@ _TOKENINFO_URL = "https://www.googleapis.com/oauth2/v1/tokeninfo"
 # reconciled by the invocation marker, not hidden as a final AlreadyExists.
 _NO_CREATE_RETRY = gax_retry.Retry(predicate=lambda _exc: False)
 
+# The ONLY email shape that is a `serviceAccount:` IAM member for this suite:
+# <id>@<project>.iam.gserviceaccount.com. Every other principal an ADC token can
+# resolve to — a human account, a federated (Workload Identity Federation)
+# principal — is a `user:` member.
+_SA_EMAIL_RE = re.compile(r"^[^@\s]+@[^@\s]+\.iam\.gserviceaccount\.com$")
+
+# Kind recorded on a service-account candidate whose ownership an ambiguous
+# create could not settle. Teardown matches on it before touching anything.
+SERVICE_ACCOUNT_CANDIDATE_TYPE = "service_account"
+
+# Bounded marker re-verification envelope for a reclamation pass. Matches the
+# vm teardown budget: absence must be earned across every attempt, because a
+# committed-but-unpropagated create answers a single read with NotFound.
+_CANDIDATE_RECONCILE_ATTEMPTS = 3
+_CANDIDATE_RECONCILE_BACKOFF_S = 2.0
+
 
 def resolve_principal_member() -> str:
     """Resolve the principal that must be granted ``serviceAccountUser`` on a new SA.
 
     Prefers the operator-pinned ``GCP_TEST_SA_EMAIL`` (a USER email — the
-    principal that will act-as the created SA). Otherwise refresh ADC and read
-    the OAuth2 tokeninfo endpoint for the active principal's email. Returns the
-    IAM member string (``user:`` or ``serviceAccount:`` prefixed).
+    principal that will act-as the created SA). Otherwise refresh ADC, ask the
+    OAuth2 tokeninfo endpoint for the CANONICAL email of the active principal,
+    and derive the member prefix from that email's SHAPE.
+
+    The SDK credential object is deliberately NOT the discriminator. ADC can be
+    user credentials, a metadata-server service account, a Cloud Run / GKE
+    workload identity, or a Workload Identity Federation credential, and
+    ``creds.service_account_email`` is not stable across those shapes: the
+    metadata server exposes the alias ``"default"`` (which would emit the
+    invalid member ``serviceAccount:default``) and federated credentials omit
+    the attribute entirely. Only the tokeninfo email is canonical for all four,
+    so it is resolved first and the prefix follows from it: ``serviceAccount:``
+    only for ``<id>@<project>.iam.gserviceaccount.com``, otherwise ``user:``.
     """
     pinned = os.environ.get("GCP_TEST_SA_EMAIL", "").strip()
     if pinned:
@@ -110,20 +143,14 @@ def resolve_principal_member() -> str:
     auth_req = google.auth.transport.requests.Request()
     creds.refresh(auth_req)
 
-    # Service-account ADC exposes the email directly; user ADC does not, so
-    # fall back to the tokeninfo endpoint.
-    sa_email = getattr(creds, "service_account_email", None)
-    if sa_email and sa_email != "default":
-        return f"serviceAccount:{sa_email}"
-
     resp = auth_req(url=f"{_TOKENINFO_URL}?access_token={creds.token}", method="GET")
     info = json.loads(resp.data.decode("utf-8") if isinstance(resp.data, bytes) else resp.data)
-    email = info.get("email")
+    email = str(info.get("email") or "").strip()
     if not email:
         raise RuntimeError(
             "could not resolve ADC principal email from tokeninfo; set GCP_TEST_SA_EMAIL to the operator principal"
         )
-    prefix = "serviceAccount:" if email.endswith(".gserviceaccount.com") else "user:"
+    prefix = "serviceAccount:" if _SA_EMAIL_RE.match(email) else "user:"
     return f"{prefix}{email}"
 
 
@@ -134,6 +161,7 @@ def create_service_account_resource(
     display_name: str,
     description: str = "",
     on_accepted: Callable[[], None],
+    on_unreconciled: Callable[[UnreconciledCandidate, Exception, str], None] | None = None,
 ) -> iam_admin_v1.ServiceAccount:
     """Create a test-owned service account and return the provider ``ServiceAccount``.
 
@@ -146,6 +174,15 @@ def create_service_account_resource(
     create or after an ambiguous create whose exact invocation marker is read
     back. Callers must gate cleanup on that handoff so they neither leak the
     latter nor delete a same-name foreign resource.
+
+    ``on_unreconciled`` receives ``(candidate, error, detail)`` when the
+    reconciling readback is DENIED or keeps failing — the state where the account
+    may exist but ownership is proven neither way. The invocation marker is
+    generated here, so this callback is the ONLY way a caller can learn it: the
+    candidate carries the resource kind, the exact email, the project, and that
+    marker, which is exactly what a later reclamation pass must re-verify before
+    deleting anything. A caller that omits it drops the handoff and a
+    committed-but-unacknowledged account leaks.
     """
     iam = iam_admin_v1.IAMClient()
     invocation_id = new_invocation_id()
@@ -154,6 +191,23 @@ def create_service_account_resource(
     sa = iam_admin_v1.ServiceAccount()
     sa.display_name = display_name
     sa.description = description_with_invocation(description, invocation_id)
+
+    def _retain_candidate(error: Exception, detail: str) -> None:
+        if on_unreconciled is None:
+            return
+        on_unreconciled(
+            UnreconciledCandidate(
+                resource_type=SERVICE_ACCOUNT_CANDIDATE_TYPE,
+                name=email,
+                project=project,
+                # Service accounts are project-global: no zone scope to record.
+                zone="",
+                invocation_id=invocation_id,
+            ),
+            error,
+            detail,
+        )
+
     return submit_owned_create(
         lambda: iam.create_service_account(
             name=f"projects/{project}",
@@ -164,6 +218,7 @@ def create_service_account_resource(
         lambda: iam.get_service_account(name=resource_name),
         lambda resource: has_invocation_description(resource, invocation_id),
         on_accepted=on_accepted,
+        on_unreconciled=_retain_candidate if on_unreconciled is not None else None,
     )
 
 
@@ -174,6 +229,7 @@ def create_service_account(
     display_name: str,
     description: str = "",
     on_accepted: Callable[[], None],
+    on_unreconciled: Callable[[UnreconciledCandidate, Exception, str], None] | None = None,
 ) -> str:
     """Create a test-owned service account and require exact cleanup handoff."""
     return create_service_account_resource(
@@ -182,7 +238,101 @@ def create_service_account(
         display_name=display_name,
         description=description,
         on_accepted=on_accepted,
+        on_unreconciled=on_unreconciled,
     ).email
+
+
+def verify_service_account_ownership(
+    candidate: UnreconciledCandidate,
+    *,
+    default_project: str = "",
+) -> tuple[str, str]:
+    """Re-read one unresolved candidate and decide ownership; ``(verdict, detail)``.
+
+    The verdict comes ONLY from the per-invocation marker the creating step
+    stamped into the account description — never from the name, which a later run
+    can legitimately reuse. A candidate that arrives without a marker is reported
+    inconclusive rather than deleted on faith.
+
+    Absence uses the same bounded, monotonic envelope the creating step used
+    (``reconcile_owned``): the candidate exists precisely because a create
+    response was lost, and a committed create that has not propagated yet answers
+    a single read with ``NotFound``. Only an all-``NotFound`` sequence discards
+    the handoff; a denied or mixed sequence stays ``inconclusive`` so the caller
+    preserves the account and fails honestly.
+    """
+    if candidate.resource_type != SERVICE_ACCOUNT_CANDIDATE_TYPE:
+        return RECONCILE_INCONCLUSIVE, f"unsupported candidate kind {candidate.resource_type!r}"
+    if not candidate.invocation_id:
+        return RECONCILE_INCONCLUSIVE, "no invocation marker recorded; ownership cannot be proven"
+
+    iam = iam_admin_v1.IAMClient()
+    # `-` is the project wildcard the IAM API accepts when neither the candidate
+    # nor the caller recorded a project.
+    scope = candidate.project or default_project or "-"
+    resource_name = f"projects/{scope}/serviceAccounts/{candidate.name}"
+
+    def _read_back() -> Any:
+        return retry_idempotent(
+            iam.get_service_account,
+            name=resource_name,
+            op_desc=f"iam.get_service_account {candidate.name} (marker verification)",
+        )
+
+    return reconcile_owned(
+        _read_back,
+        lambda resource: has_invocation_description(resource, candidate.invocation_id),
+        attempts=_CANDIDATE_RECONCILE_ATTEMPTS,
+        backoff_seconds=_CANDIDATE_RECONCILE_BACKOFF_S,
+    )
+
+
+def reclaim_unreconciled_service_accounts(
+    candidates: Iterable[UnreconciledCandidate],
+    *,
+    default_project: str = "",
+) -> tuple[list[str], list[str], bool]:
+    """Delete every candidate whose recorded marker still matches; report the rest.
+
+    Returns ``(deleted_emails, warnings, ok)``. This is the terminal consumer of
+    the ambiguous-create handoff, so each verdict is acted on exactly once:
+
+      * ``owned`` — the account still echoes this invocation's marker, so it is
+        this run's and is deleted;
+      * ``foreign`` — the name matches but the marker does not; it belongs to
+        another run and is NEVER deleted, only reported;
+      * ``absent`` — every bounded attempt was a conclusive ``NotFound``; nothing
+        was committed (or it is already gone) and the record is discarded;
+      * ``inconclusive`` — ownership is unproven, so nothing is deleted and
+        ``ok`` is False: "might still exist" is not clean cleanup.
+    """
+    deleted: list[str] = []
+    warnings: list[str] = []
+    ok = True
+    for candidate in candidates:
+        label = candidate.describe()
+        verdict, detail = verify_service_account_ownership(candidate, default_project=default_project)
+        candidate_project = candidate.project or default_project or None
+        if verdict == RECONCILE_OWNED:
+            print(f"Unreconciled candidate {label}: {detail}; deleting", file=sys.stderr)
+            if delete_service_account(candidate.name, project=candidate_project):
+                deleted.append(candidate.name)
+            else:
+                ok = False
+                warnings.append(f"unreconciled {label} delete failed after marker match")
+        elif verdict == RECONCILE_FOREIGN:
+            print(f"Unreconciled candidate {label}: {detail}; preserving", file=sys.stderr)
+            warnings.append(f"unreconciled {label} preserved: {detail}")
+        elif verdict == RECONCILE_ABSENT:
+            print(
+                f"Unreconciled candidate {label}: {detail} on every bounded attempt; "
+                "nothing was committed, or it is already gone",
+                file=sys.stderr,
+            )
+        else:
+            ok = False
+            warnings.append(f"unreconciled {label} ownership unproven ({detail}); nothing deleted")
+    return deleted, warnings, ok
 
 
 def _list_service_account_emails(project: str) -> list[str]:

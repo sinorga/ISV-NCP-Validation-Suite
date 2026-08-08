@@ -10,7 +10,7 @@ This page covers the operator setup needed to run `isvctl` tests against GCP.
 |--------|--------|---------|------------|
 | **VM** | [`providers/gcp/config/vm.yaml`](../../isvctl/configs/providers/gcp/config/vm.yaml) | [`providers/gcp/scripts/vm/`](../../isvctl/configs/providers/gcp/scripts/vm/) | [`suites/vm.yaml`](../../isvctl/configs/suites/vm.yaml) |
 | **Network** | [`providers/gcp/config/network.yaml`](../../isvctl/configs/providers/gcp/config/network.yaml) | [`providers/gcp/scripts/network/`](../../isvctl/configs/providers/gcp/scripts/network/) | [`suites/network.yaml`](../../isvctl/configs/suites/network.yaml) |
-| **IAM** | [`providers/gcp/config/iam.yaml`](../../isvctl/configs/providers/gcp/config/iam.yaml) | [`providers/gcp/scripts/iam/`](../../isvctl/configs/providers/gcp/scripts/iam/) | [`suites/iam.yaml`](../../isvctl/configs/suites/iam.yaml) |
+| **IAM** ([guide](../../isvctl/configs/providers/gcp/scripts/iam/docs/gcp-iam.md)) | [`providers/gcp/config/iam.yaml`](../../isvctl/configs/providers/gcp/config/iam.yaml) | [`providers/gcp/scripts/iam/`](../../isvctl/configs/providers/gcp/scripts/iam/) | [`suites/iam.yaml`](../../isvctl/configs/suites/iam.yaml) |
 | **Security** | [`providers/gcp/config/security.yaml`](../../isvctl/configs/providers/gcp/config/security.yaml) | [`providers/gcp/scripts/security/`](../../isvctl/configs/providers/gcp/scripts/security/) | [`suites/security.yaml`](../../isvctl/configs/suites/security.yaml) |
 | **Image Registry** ([guide](../../isvctl/configs/providers/gcp/scripts/image-registry/docs/gcp-image-registry.md)) | [`providers/gcp/config/image-registry.yaml`](../../isvctl/configs/providers/gcp/config/image-registry.yaml) | [`providers/gcp/scripts/image-registry/`](../../isvctl/configs/providers/gcp/scripts/image-registry/) | [`suites/image-registry.yaml`](../../isvctl/configs/suites/image-registry.yaml) |
 | **Observability** ([guide](../../isvctl/configs/providers/gcp/scripts/observability/docs/gcp-observability.md)) | [`providers/gcp/config/observability.yaml`](../../isvctl/configs/providers/gcp/config/observability.yaml) | [`providers/gcp/scripts/observability/`](../../isvctl/configs/providers/gcp/scripts/observability/) | [`suites/observability.yaml`](../../isvctl/configs/suites/observability.yaml) |
@@ -185,7 +185,8 @@ before a `live` run — live mode is rejected when a required var is unset.
 | `GCP_OTHER_INSTANCE_ID` | Optional (vm) | unset — `console_rbac` self-provisions a second probe VM | Name of a **real, existing** second instance that `GCP_ALLOWED_PRINCIPAL_SA` has NOT been granted access to; completes the pre-provisioned trio. The resource-scoping subtest passes only on HTTP 403 — a missing instance returns 404, which is treated as a failure rather than as proof of scoping, so this must name a live VM. |
 | `GCP_OTHER_INSTANCE_ZONE` | Optional (vm) | unset — the target instance's zone | Zone of `GCP_OTHER_INSTANCE_ID` when that second probe VM lives in a different zone than the target VM. Consulted only on the pre-provisioned `console_rbac` path. |
 | `GCP_VM_SKIP_TEARDOWN` | Optional (vm) | unset — teardown runs | When `true`, the VM `teardown` step returns success without deleting the run-created resources (instance, SSH firewall rule, local SSH key pair, and any capacity-walk leaked-zone records); forwarded as `--skip-destroy` via the `teardown_flag` setting. The same `--skip-destroy` also reaches **every other VM step that can delete a fixture it owns**, because those in-step cleanups run long before terminal teardown: in `launch_instance` it suppresses the **setup-failure** compensating deletion of the accepted instance, SSH firewall rule, and local key (the zone-walk phantom reclamation stays ungated — an abandoned capacity-walk record is a billable phantom, not a debugging fixture), and in `console_rbac` it suppresses that step's `finally` cleanup of the two temporary probe service accounts, the disposable probe VM, and the two IAM bindings. Preservation suppresses the delete, never the ownership bookkeeping: both steps still emit their exact identities and ownership flags (`launch_instance` adds `preserved_on_failure`, `console_rbac` adds `preserved_fixtures` carrying its per-invocation ownership marker), and neither ever cleans up *partially* — a half-deleted fixture set no longer reproduces the failure. Reclaim retained `console_rbac` fixtures later with `python3 isvctl/configs/providers/gcp/scripts/vm/console_rbac.py --reclaim-preserved <console_rbac.json>` (`-` reads the payload from stdin), which re-verifies the ownership marker on each recorded identity before deleting, removes both IAM bindings by their recorded role + member, treats an already-absent resource as idempotent success, and fails closed (keeping the handoff) when a readback is denied. Unset or any other value runs the normal ownership-gated teardown. Use it to keep a failed VM run's instance alive for debugging, and **save that run's `launch_instance` step output to a JSON file** — that payload is the required ownership and zone-scope record: it is the only place the three ownership bits (`instance_created`, `firewall_created`, `key_created`) and every `leaked_zones` entry the multi-zone capacity walk touched are written down. Reclaim the resources later by replaying it through the same stub: `python3 isvctl/configs/providers/gcp/scripts/vm/teardown.py --from-launch-output <launch_instance.json> --delete-security-group --delete-key-pair` (`-` reads the payload from stdin; explicit flags still win over the payload). The replay reapplies every ownership gate — so a run that ADOPTED an operator-supplied long-lived VM, firewall rule, or private key preserves it instead of destroying it — and deletes the instance in the primary zone **and** in each leaked zone, so no phantom instance keeps billing in a zone the step output never names; `NotFound` is idempotent success, so re-running after a partial cleanup is safe. Do **not** hand-write `gcloud compute instances delete` / `gcloud compute firewall-rules delete` / `rm -f <key_file>` cleanup: those commands can read none of the ownership bits and only ever name one zone. A bare standalone `--phase teardown` also will **not** work here: `launch_instance` never ran in that process, so `--instance-id` / `--instance-created` arrive empty and teardown correctly refuses to delete a VM it cannot prove it created, reporting success with an empty `deleted` list while the GPU instance keeps billing — `--from-launch-output` is what supplies that missing provenance. |
-| `GCP_IAM_SKIP_TEARDOWN` | Optional (iam) | unset — teardown runs | When `true`, the IAM `teardown` step returns success without deleting the service account it created; clean it up later with the self-contained `delete_user.py --username <username-from-create_user-output>` command (a standalone `--phase teardown` cannot resolve the per-run service-account name because `create_user` did not run in that process). See [IAM domain](#iam-domain-service-accounts). |
+| `GOOGLE_CLOUD_PROJECT` | Optional (iam, bare metal) | `GCLOUD_PROJECT`, then the project bundled with Application Default Credentials | Project that owns the resources a run creates (for IAM, the run-created service account; flows to each step's `--project`). Unset resolves through the inherited project env vars and then ADC; a resolution failure remains a real credential/configuration error rather than a silent fallback. See [§3](#3-project-id-resolution). |
+| `GCP_IAM_SKIP_TEARDOWN` | Optional (iam) | unset — teardown runs | When `true`, the IAM `teardown` step returns success without deleting the service account it created. The same `--skip-destroy` also reaches `create_user`, whose **setup-failure** path would otherwise delete the identity it just created long before teardown runs; under preservation that compensating delete is suppressed and the retained identity is still reported (`resources_preserved`, plus `username` / `service_account_name`) so it stays reclaimable. Clean it up later with the self-contained `delete_user.py --username <username-from-create_user-output>` command (a standalone `--phase teardown` cannot resolve the per-run service-account name because `create_user` did not run in that process). See the [IAM guide](../../isvctl/configs/providers/gcp/scripts/iam/docs/gcp-iam.md). |
 | `GCP_IMAGE_REGISTRY_SKIP_TEARDOWN` | Optional (image-registry) | unset — teardown runs | When `true`, the image-registry `teardown` step returns success without deleting the in-test resources (imported image, staging bucket + disk objects, instance, SSH firewall rule, local SSH key); forwarded as `--skip-destroy`. The GCP-namespaced override of the suite's vendor-neutral `IR_SKIP_TEARDOWN`. See the [Image Registry guide](../../isvctl/configs/providers/gcp/scripts/image-registry/docs/gcp-image-registry.md). |
 | `EDGE_ENDPOINTS` | Optional (security) | unset — `InsecureProtocolsCheck` structured-skips | Comma-joined `host:port` HTTPS endpoints the provider-neutral raw-socket prober checks for plain-HTTP / legacy-TLS refusal. Every endpoint must also complete a modern TLS 1.2+ handshake; a closed, timed-out, or unreachable port fails rather than masquerading as secure protocol policy. See [Security domain](#security-domain). |
 | `SEC02_MAX_TTL_SECONDS` | Optional (security) | `43200` | Positive integer upper bound (seconds) `ShortLivedCredentialsCheck` asserts observed node-equivalent and workload-equivalent token TTLs stay at-or-below; invalid or non-positive values fail configuration. The no-VM probe uses delegated IAM Credentials and Workload Identity Federation/STS. A non-skipped run requires both surfaces—one available surface does not substitute for the other. The default never false-fails; tighten only after a run confirms observed TTLs. |
@@ -251,61 +252,6 @@ uv run isvctl test run -f isvctl/configs/providers/gcp/config/vm.yaml
 ```
 
 The VM suite exercises 11 subtests end-to-end: launch (with GPU + cloud-init + SSH stability gate), tag verification, serial console output, console-RBAC probe (creates two short-lived probe service accounts + a second probe VM), idempotent stop / start / reboot lifecycle, describe (host OS / driver / CPU / container runtime checks), NIM deploy + inference, teardown of all created resources. Wall-clock is roughly 30–45 minutes on a clean operator environment; capacity stockout in one zone triggers a documented walk to the next zone in the preferred list.
-
-## IAM domain (service accounts)
-
-Google Cloud has no human IAM users, so the IAM suite is an adaptation: the
-closest managed, provider-owned identity primitive is a **service account**.
-The suite's `create_user` step creates a uniquely-named service account,
-`test_credentials` proves a credential minted for it authenticates, and
-`teardown` deletes it.
-
-Because hardened organizations commonly block user-managed service-account
-keys (`constraints/iam.disableServiceAccountKeyCreation`), the portable
-**primary credential path is keyless**: `create_user` grants the ADC principal
-`roles/iam.serviceAccountTokenCreator` on the new service account and mints a
-short-lived (600s) OAuth2 access token via
-`IAMCredentials.generateAccessToken`. No JSON key file is ever written, so
-`iam.disableServiceAccountKeyCreation` does **not** need to be disabled. The
-AWS-shaped output field names are preserved for contract compatibility:
-`access_key_id` is the service account `unique_id` (non-secret) and
-`secret_access_key` is the short-lived token (redacted from logs).
-
-### IAM roles
-
-The principal running the IAM suite (user or service account) needs, on the
-project:
-
-- `roles/iam.serviceAccountAdmin` — create and delete the test service account.
-- `roles/iam.serviceAccountTokenCreator` — the suite grants this dynamically on
-  the *new* service account, so the running principal needs the project-level
-  binding that lets it set that policy and call `generateAccessToken`.
-
-The newly-granted `tokenCreator` binding is eventually-consistent — convergence
-up to ~180s has been observed on hardened orgs — so `create_user` retries the
-token mint (12 × 15s) and its step timeout floor is 420s.
-
-### Running
-
-```bash
-# Prerequisites: ADC + a resolvable project (GOOGLE_CLOUD_PROJECT or ADC).
-uv run isvctl test run -f isvctl/configs/providers/gcp/config/iam.yaml
-```
-
-Set `GCP_IAM_SKIP_TEARDOWN=true` to keep the created service account after a
-run. The service account is named with a per-run random suffix
-(`isv-test-user-<disc>-<run>@<project>.iam.gserviceaccount.com`), so a fresh
-standalone `isvctl test run --phase teardown` cannot clean it up: `create_user`
-did not execute in that process, so the teardown step's
-`{{steps.create_user.username}}` reference is unresolved. Instead, copy the
-`username` value printed by the original `create_user` step and delete the
-service account directly:
-
-```bash
-uv run python3 isvctl/configs/providers/gcp/scripts/iam/delete_user.py \
-  --username <username-from-create_user-output> \
-  --project=<project>   # optional; the delete uses the projects/-/ wildcard
-```
 
 ## Security domain
 

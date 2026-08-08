@@ -58,6 +58,10 @@ commands:
       # Setup: create a service account and mint a short-lived impersonation
       # token. >=420s: 180s tokenCreator-binding propagation budget (12 x 15s)
       # plus margin for create + bind + initial mint + transient retries.
+      # `teardown_flag` is forwarded here too, not only to the terminal teardown
+      # step: this step's setup-failure path deletes the identity it just
+      # created, and that compensating delete runs long before teardown — so an
+      # operator asking to preserve fixtures must gate it as well.
       - name: create_user
         phase: setup
         command: "python3 ../scripts/iam/create_user.py"
@@ -66,6 +70,7 @@ commands:
           - "isv-test-user"
           - "--create-access-key"
           - "--project={{project | default('')}}"
+          - "{{teardown_flag}}"
         timeout: 420
 
       # Test: prove the minted token is live for the expected service account
@@ -91,8 +96,23 @@ commands:
         command: "python3 ../scripts/iam/delete_user.py"
         args:
           - "--username"
-          - "{{steps.create_user.username}}"
+          # create_user emits `username` only once it owns an identity, and
+          # teardown still runs after a setup failure. Boolean-mode defaulting
+          # keeps an empty or missing value from collapsing the argv pair and
+          # shifting the following flag into the value slot; the stub reads
+          # `none` as "no identity was recorded".
+          - "{{steps.create_user.username | default('none', true)}}"
           - "--project={{steps.create_user.project | default(project) | default('')}}"
+          - "--unreconciled-resources"
+          # Ambiguous-create candidates: accounts create_user may have committed
+          # before losing the acknowledgement, whose ownership its readback could
+          # not settle. They carry no `service_account_created` bit precisely
+          # because none could be set honestly, so this is the ONLY channel that
+          # keeps the handoff alive to the terminal cleanup; teardown re-verifies
+          # each recorded invocation marker before deleting and never touches a
+          # mismatch. Happy path emits `[]`, whose join(',') is an empty string,
+          # so the same non-empty sentinel keeps the argv aligned.
+          - "{{steps.create_user.unreconciled_resources | join(',') | default('none', true)}}"
           - "{{teardown_flag}}"
         timeout: 180
 

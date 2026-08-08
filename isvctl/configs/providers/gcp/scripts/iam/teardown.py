@@ -14,28 +14,39 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""GCP IAM cleanup of test service accounts by prefix (optional ISV-facing scaffold).
+"""GCP IAM reclamation of run-owned service accounts (optional ISV-facing scaffold).
 
-Counterpart to the AWS reference `teardown.sh`. Deletes service accounts whose
-email local-part starts with ``--prefix``, so an operator can sweep leftovers
-from interrupted runs. This script is NOT invoked by suites/iam.yaml — the
-wired teardown-phase step is `delete_user`, which deletes only the specific
-service account `create_user` made. This prefix sweep is a broader, opt-in
-helper an ISV can run by hand.
+Counterpart to the AWS reference `teardown.sh`, for the leftovers an interrupted
+run recorded but could not clean up itself. This script is NOT invoked by
+suites/iam.yaml — the wired teardown-phase step is `delete_user`, which deletes
+the specific service account `create_user` made plus the same candidate handoff
+this helper consumes.
 
-When no project / Application Default Credentials resolve, there is nothing to
-sweep and the script succeeds with an empty result. ``--skip-destroy`` returns
-success without deleting anything.
+Cleanup scope is EXPLICIT, never inferred: the only accounts this helper can
+touch are the packed candidates `create_user` emitted in
+``unreconciled_resources``, and each one is deleted only after its recorded
+per-invocation marker is re-verified on that exact account. A name prefix is not
+ownership — a sweep over "everything that looks like ours" deletes a concurrent
+run's identity (or an operator's same-named account) with no way to tell the
+difference — so no name-shaped sweep exists here.
+
+A marker mismatch is another run's account and is never deleted; a lookup that
+stays denied or failing deletes nothing either and fails honestly so the operator
+can replay the reclamation. When the project / Application Default Credentials do
+not resolve, the recorded candidates CANNOT be verified, so the run exits nonzero
+rather than reporting a clean cleanup it never performed. ``--skip-destroy``
+returns success without deleting anything.
 
 Usage:
-    python3 teardown.py --project=my-project --prefix=isv-test-user-
+    python3 teardown.py --project=my-project \\
+      --unreconciled-resources "$(jq -r '.unreconciled_resources | join(",")' create_user.json)"
 
 Output JSON:
 {
     "success": true,
     "platform": "iam",
     "resources_deleted": ["isv-test-user-...@my-project.iam.gserviceaccount.com"],
-    "message": "Cleaned up 1 service account(s)"
+    "message": "Reclaimed 1 of 1 recorded candidate(s)"
 }
 """
 
@@ -50,18 +61,21 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # providers/gcp/sc
 
 from common.compute import resolve_project
 from common.errors import classify_gcp_error, handle_gcp_errors
-from common.service_account import delete_service_account
-from google.cloud import iam_admin_v1
+from common.ownership import parse_unreconciled_records
+from common.service_account import reclaim_unreconciled_service_accounts
 
 
 @handle_gcp_errors
 def main() -> int:
-    parser = argparse.ArgumentParser(description="GCP IAM prefix cleanup (optional scaffold)")
+    parser = argparse.ArgumentParser(description="GCP IAM candidate reclamation (optional scaffold)")
     parser.add_argument("--project", default="", help="GCP project (falls back to env/ADC when blank)")
     parser.add_argument(
-        "--prefix",
-        default="isv-test-user-",
-        help="Delete service accounts whose ID starts with this prefix",
+        "--unreconciled-resources",
+        default="",
+        help=(
+            "Comma-joined packed candidates from create_user's unreconciled_resources "
+            "(kind|name|project|zone|invocation); only marker-verified accounts are deleted"
+        ),
     )
     parser.add_argument("--skip-destroy", action="store_true", help="Skip actual destroy")
     args = parser.parse_args()
@@ -73,45 +87,49 @@ def main() -> int:
         "message": "",
     }
 
+    candidates = parse_unreconciled_records(args.unreconciled_resources)
+
     if args.skip_destroy:
         result["message"] = "Cleanup skipped (--skip-destroy flag)"
         print(json.dumps(result, indent=2))
         return 0
 
-    if not args.prefix:
-        result["success"] = False
-        result["error_type"] = "unknown_error"
-        result["error"] = "--prefix must be non-empty to avoid deleting unrelated service accounts"
-        result["message"] = "Refusing to sweep with an empty prefix"
+    if not candidates:
+        # Nothing was handed off, so there is nothing this helper is entitled to
+        # delete. It does not go looking for more.
+        result["message"] = "No recorded candidates supplied; nothing to reclaim"
         print(json.dumps(result, indent=2))
-        return 1
+        return 0
 
     try:
         project = resolve_project(args.project or None)
     except Exception as e:
-        # Nothing to sweep without a resolvable project; succeed as a no-op.
+        # Recorded candidates exist and cannot be verified without a project /
+        # credentials, so this is a BLOCKED cleanup, not a no-op: exit nonzero
+        # so the operator retries instead of reading a green run as "clean".
         error_type, error_msg = classify_gcp_error(e)
-        result["message"] = f"cleanup skipped ({error_type}): {error_msg}"
+        result["success"] = False
+        result["error_type"] = error_type
+        # The bucket token must live in the `error` STRING: only that field is
+        # forwarded into the validation verdict.
+        result["error"] = f"[bucket={error_type}] cannot reclaim {len(candidates)} recorded candidate(s): {error_msg}"
+        result["message"] = "Cleanup blocked: project/credentials did not resolve"
         print(json.dumps(result, indent=2))
-        return 0
+        return 1
 
-    iam = iam_admin_v1.IAMClient()
-    failures = 0
-    for service_account in iam.list_service_accounts(name=f"projects/{project}"):
-        if not service_account.email.split("@", 1)[0].startswith(args.prefix):
-            continue
-        if delete_service_account(service_account.email, project=project):
-            result["resources_deleted"].append(service_account.email)
-        else:
-            failures += 1
+    reclaimed, warnings, ok = reclaim_unreconciled_service_accounts(candidates, default_project=project)
+    result["resources_deleted"] = list(reclaimed)
+    if warnings:
+        result["warnings"] = warnings
 
-    deleted = len(result["resources_deleted"])
-    result["success"] = failures == 0
-    result["message"] = f"Cleaned up {deleted} service account(s)"
-    if failures:
-        result["message"] += f"; {failures} failed to delete"
+    result["success"] = ok
+    result["message"] = f"Reclaimed {len(reclaimed)} of {len(candidates)} recorded candidate(s)"
+    if not ok:
         result["error_type"] = "api_error"
-        result["error"] = f"{failures} service account(s) failed to delete after bounded retry"
+        result["error"] = (
+            "[bucket=api_error] recorded candidate(s) were not reclaimed "
+            "(ownership unproven or delete failed after marker match)"
+        )
 
     print(json.dumps(result, indent=2))
     return 0 if result["success"] else 1
